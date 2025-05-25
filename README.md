@@ -24,12 +24,10 @@
 ### $N=50$
 ![AGV_vUeLwTdneJsi483dALA7e_GR1kliiXC5aciok4tHrhQ7JYVzaE8Y7XhLwJggiie0rlQhMVxu8vx0Wm-mLaaG9Y3euIltPVvETWQpp33Awri-Fge64ozFkzVf](https://github.com/user-attachments/assets/675ce624-58e8-47e7-962a-e5ab9ec62ec8)
 
-### Distribución de parámetros
 ![unknown](https://github.com/user-attachments/assets/ee38c88d-1c20-4a93-8fc7-659053b8bb1f)
 
 ![unknown](https://github.com/user-attachments/assets/4409db89-d34d-4e6e-b9cb-d4fbda76235e)
 
-### Distribución de gradientes
 ![AGV_vUeon5xmIGY87uBFntoxm831fgHXFWh_NfUCcyibkRPcJKL6PgIL_XJRRe8B2AA51IhgsoSAv8tD6j0VD8XPA9TedcEpfOz1pQk72H_9FPUFLV4BeyOz3UKT](https://github.com/user-attachments/assets/352f3363-38fc-4b9e-8826-9bdb3105291a)
 
 ![unknown](https://github.com/user-attachments/assets/e56ebbce-2a49-4d76-a2c1-bd99528712e4)
