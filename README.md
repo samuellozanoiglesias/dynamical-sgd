@@ -32,7 +32,15 @@
 ### Distribución de gradientes
 ![AGV_vUeon5xmIGY87uBFntoxm831fgHXFWh_NfUCcyibkRPcJKL6PgIL_XJRRe8B2AA51IhgsoSAv8tD6j0VD8XPA9TedcEpfOz1pQk72H_9FPUFLV4BeyOz3UKT](https://github.com/user-attachments/assets/352f3363-38fc-4b9e-8826-9bdb3105291a)
 
+![unknown](https://github.com/user-attachments/assets/e56ebbce-2a49-4d76-a2c1-bd99528712e4)
+
 ## Material extra
+
+<p align="left">
+  <img src="https://github.com/user-attachments/assets/6be44635-da1a-4ba9-b7b0-5e343ff21189" width="400"/>
+</p>
+
+
 https://github.com/user-attachments/assets/3de7c7ff-c5a7-4c0b-a021-2531b6a3acba
 
 
