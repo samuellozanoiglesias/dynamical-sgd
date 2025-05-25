@@ -48,6 +48,6 @@ https://github.com/user-attachments/assets/d7a8b3bf-d558-4ed9-b2b0-370461d25568
 
 
 
-El código disponible en este repositorio fue escrito por [Nicolas Ratier Werbin](mailto:nicolasratierwerbin@gmail.com).
+Este código fue escrito por [Nicolas Ratier Werbin](mailto:nicolasratierwerbin@gmail.com).
 
 
