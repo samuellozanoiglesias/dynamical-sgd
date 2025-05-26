@@ -4,7 +4,11 @@
 
 > Utilizando este método, nos centramos en entender cómo se reconfigura internamente una red neuronal entrenada mediante lotes de composición dinámica. Nuestro objetivo es estudiar si esta dinámica induce una reorganización progresiva de los parámetros, similar a la resolución secuencial de frustraciones observada en redes físicas. Para ello, analizaremos desde métricas globales -como la distancia $L_2$ al origen y la evolución macroscópica de las fronteras de decisión- hasta aspectos que llamaremos microscópicos -como los gradientes principales, la evolución de los parámetros capa por capa y la geometría de sus distribuciones. En conjunto, estos experimentos buscan identificar patrones que emerjan de forma espontánea y permitan entender cómo se coordinan las distintas partes de la red para resolver distintas tareas sin interferencias destructivas.
 
-# Figuras Adicionales
+![AGV_vUdcsz0arOtjC137aWONzxckbqmDTWWqs2jM7RN36V6-r2vGJteTQ0j3XEqZcJ_mtKl71ieSfFA1TA9jKURYUAIn2IVdeozAk-ZlImBhFuxiIg5wUx0uaLxx](https://github.com/user-attachments/assets/c2e781a0-cc0e-424d-bf9e-cc385f3c65f0)
+
+# Autor
+Este código fue escrito por [Nicolas Ratier Werbin](mailto:nicolasratierwerbin@gmail.com).
+<!-- # Figuras Adicionales
 ## Análisis macroscópico de la dinámica de aprendizaje
 ### Resultados con amplitud $A = 70$
 ![AGV_vUdcsz0arOtjC137aWONzxckbqmDTWWqs2jM7RN36V6-r2vGJteTQ0j3XEqZcJ_mtKl71ieSfFA1TA9jKURYUAIn2IVdeozAk-ZlImBhFuxiIg5wUx0uaLxx](https://github.com/user-attachments/assets/c2e781a0-cc0e-424d-bf9e-cc385f3c65f0)
