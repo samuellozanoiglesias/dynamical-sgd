@@ -1,51 +1,342 @@
-# El aprendizaje automático como sistema físico fuera del equilibrio
+# Dynamical SGD: Neural Network Learning as Non-Equilibrium Physics
 
-> En lugar de utilizar una función de coste que evoluciona dinámicamente, seguimos un enfoque diferente. En la práctica, no se utiliza todo el conjunto de datos a la vez para optimizar, principalmente porque no es eficiente computacionalmente. En su lugar, se seleccionan aleatoriamente pequeños subconjuntos del conjunto de datos en cada iteración, lo que se conoce como descenso de gradiente estocástico (SGD). El enfoque que adoptamos aquí combina esta idea con la pérdida dinámica: el subconjunto de datos (o lote) que tomamos en cada iteración incluye ejemplos aleatorios de distintas clases, pero en proporciones cíclicas que varían en el tiempo.
+[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![JAX](https://img.shields.io/badge/JAX-latest-green.svg)](https://github.com/google/jax)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-> Utilizando este método, nos centramos en entender cómo se reconfigura internamente una red neuronal entrenada mediante lotes de composición dinámica. Nuestro objetivo es estudiar si esta dinámica induce una reorganización progresiva de los parámetros, similar a la resolución secuencial de frustraciones observada en redes físicas. Para ello, analizaremos desde métricas globales -como la distancia $L_2$ al origen y la evolución macroscópica de las fronteras de decisión- hasta aspectos que llamaremos microscópicos -como los gradientes principales, la evolución de los parámetros capa por capa y la geometría de sus distribuciones. En conjunto, estos experimentos buscan identificar patrones que emerjan de forma espontánea y permitan entender cómo se coordinan las distintas partes de la red para resolver distintas tareas sin interferencias destructivas.
+## Overview
 
-![Training visualization](dynamical-loss.png)
-# Autor
-Este código fue escrito por [Nicolas Ratier Werbin](mailto:nicolasratierwerbin@gmail.com).
-<!-- # Figuras Adicionales
-## Análisis macroscópico de la dinámica de aprendizaje
-### Resultados con amplitud $A = 70$
-![AGV_vUdcsz0arOtjC137aWONzxckbqmDTWWqs2jM7RN36V6-r2vGJteTQ0j3XEqZcJ_mtKl71ieSfFA1TA9jKURYUAIn2IVdeozAk-ZlImBhFuxiIg5wUx0uaLxx](https://github.com/user-attachments/assets/c2e781a0-cc0e-424d-bf9e-cc385f3c65f0)
+This project implements a novel approach to studying neural network learning dynamics by treating machine learning as a non-equilibrium physical system. Instead of using a dynamically evolving cost function, we employ **dynamic batch composition** - where training batches have periodically varying class proportions over time.
 
-### Resultados con amplitud $A=10$
-![IMG_6F23003FE771-1](https://github.com/user-attachments/assets/ab07b6b7-e9ef-44f4-afff-93fdb356c9e9)
+### Key Innovation
 
-### Resultados sin oscilaciones, $A=1$
-![image](https://github.com/user-attachments/assets/f258106a-a847-4ddf-9c93-79b0ad688c5b)
+Rather than selecting completely random subsets of data in each iteration (traditional SGD), we:
+- Sample random examples from different classes
+- Vary the class proportions cyclically over time
+- Study how neural networks internally reconfigure under this periodic training regime
 
-## Análisis microscópico de la reconfiguración interna
+This approach allows us to analyze how different parts of the network coordinate to solve different tasks without destructive interference, similar to the sequential resolution of frustrations observed in physical networks.
 
-### Capa oculta de tamaño $N=500$
-![AGV_vUdr-N_VUTTAIUcbcn2i_-ymVrGowy_J24re4nVHk9YsNMSVsgwLSfvXpZk0Z3qVV7UWq6SOdfgjpSeCYKlPv-fceU8M9d1Ciz2dhmD-oGIpPvIkAF107OWd](https://github.com/user-attachments/assets/37c24fe2-b039-4f51-90cb-4cc9e7a56524)
+## Features
 
-### Capa oculta de tamaño $N=50$
-![AGV_vUeLwTdneJsi483dALA7e_GR1kliiXC5aciok4tHrhQ7JYVzaE8Y7XhLwJggiie0rlQhMVxu8vx0Wm-mLaaG9Y3euIltPVvETWQpp33Awri-Fge64ozFkzVf](https://github.com/user-attachments/assets/675ce624-58e8-47e7-962a-e5ab9ec62ec8)
+- 🌀 **Spiral Dataset Generation**: Multi-class spiral datasets with configurable parameters
+- 🔄 **Dynamic Class Focus**: Periodic emphasis on different classes during training
+- 📊 **Comprehensive Analysis**: Weight evolution, gradient distributions, and layer-wise dynamics
+- 📈 **Rich Visualizations**: Decision boundaries, training curves, and dynamical analysis plots
+- ⚙️ **Flexible Configuration**: YAML-based configuration system for easy experimentation
+- 🚀 **GPU Acceleration**: JAX-based implementation with automatic GPU detection
+- 📝 **Detailed Logging**: Comprehensive experiment tracking and reproducibility
 
-![unknown](https://github.com/user-attachments/assets/ee38c88d-1c20-4a93-8fc7-659053b8bb1f)
+## Installation
 
-![unknown](https://github.com/user-attachments/assets/4409db89-d34d-4e6e-b9cb-d4fbda76235e)
+### Prerequisites
 
-![AGV_vUeon5xmIGY87uBFntoxm831fgHXFWh_NfUCcyibkRPcJKL6PgIL_XJRRe8B2AA51IhgsoSAv8tD6j0VD8XPA9TedcEpfOz1pQk72H_9FPUFLV4BeyOz3UKT](https://github.com/user-attachments/assets/352f3363-38fc-4b9e-8826-9bdb3105291a)
+- Python 3.8 or higher
+- NVIDIA GPU (optional, but recommended for larger experiments)
+- CUDA 11.0+ (if using GPU)
 
-![unknown](https://github.com/user-attachments/assets/e56ebbce-2a49-4d76-a2c1-bd99528712e4)
+### Quick Start
 
-## Material Adicional
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/NicolasRW/dynamical-sgd.git
+   cd dynamical-sgd
+   ```
 
-<p align="left">
-  <img src="https://github.com/user-attachments/assets/6be44635-da1a-4ba9-b7b0-5e343ff21189" width="450"/>
-</p>
+2. **Create a virtual environment:**
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   ```
 
+3. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-https://github.com/user-attachments/assets/3de7c7ff-c5a7-4c0b-a021-2531b6a3acba
+4. **Run a basic experiment:**
+   ```bash
+   python run_experiment.py --config config/default_config.yaml
+   ```
 
+### Development Installation
 
-https://github.com/user-attachments/assets/d7a8b3bf-d558-4ed9-b2b0-370461d25568
+For development and customization:
 
-# Autor
-Este código fue escrito por [Nicolas Ratier Werbin](mailto:nicolasratierwerbin@gmail.com).
+```bash
+pip install -e .
+```
+
+## Usage
+
+### Basic Usage
+
+Run a standard experiment with default parameters:
+```bash
+python run_experiment.py
+```
+
+### Custom Configuration
+
+Create a custom configuration file or override parameters:
+
+```bash
+# Using a custom config file
+python run_experiment.py --config my_config.yaml
+
+# Override specific parameters
+python run_experiment.py --override model.nn_width=200 --override training.batch_size=100
+
+# Multiple overrides
+python run_experiment.py \
+    --override model.nn_width=500 \
+    --override dynamics.w_max=150 \
+    --override training.total_steps=100000
+```
+
+### Systematic Studies
+
+Run systematic parameter sweeps:
+```bash
+python systematic_train.py --config config/systematic_study_config.yaml
+python systematic_train.py --quick                                    # Fast test
+python systematic_train.py --extensive                                # Comprehensive sweep
+```
+
+## Configuration
+
+The system uses YAML configuration files for maximum flexibility. Key configuration sections:
+
+### Data Configuration
+```yaml
+data:
+  points_per_class: 100      # Points per spiral class
+  num_classes: 3             # Number of spiral classes
+  revolutions: 4.0           # Spiral revolutions
+  noise_std: 0.2            # Noise level
+  test_ratio: 0.2            # Test set fraction
+```
+
+### Model Configuration
+```yaml
+model:
+  nn_width: 100              # Hidden layer width
+  activation: "relu"         # Activation function
+  use_bias: true            # Include bias terms
+```
+
+### Dynamics Configuration
+```yaml
+dynamics:
+  period_length: 5000        # Period T for class focus
+  w_max: 70.0               # Maximum class weight
+  enable_dynamics: true      # Enable dynamic training
+```
+
+### Training Configuration
+```yaml
+training:
+  total_steps: 75000         # Total training steps
+  batch_size: 50            # Batch size
+  learning_rate: 0.01       # Learning rate
+```
+
+See `config/default_config.yaml` for complete configuration options.
+
+## Advanced Analysis Modules
+
+For researchers interested in deep analysis of neural network dynamics, additional specialized tools are available in the `analysis/` directory:
+
+### Gradient Distribution Analysis
+```bash
+# Advanced gradient and KL divergence analysis
+python analysis/advanced_gradient_analysis.py --experiment_dir outputs/experiment_001
+```
+
+### Weight Correlation Analysis  
+```bash
+# Parameter correlation matrices and trajectory analysis
+python analysis/correlation_analysis.py --weights_file outputs/experiment_001/weights_history.pkl
+```
+
+### Specialized Research Experiments
+```bash
+# Recreate specific analysis workflows from research papers
+python analysis/dynamics_experiments.py --experiment_type gradient_phase_analysis
+python analysis/dynamics_experiments.py --experiment_type systematic_study
+```
+
+These modules provide:
+- **KL divergence computation** between gradient distributions across training phases
+- **Disjoint distribution analysis** for different parts of the training period
+- **Shannon entropy evolution** tracking for gradient and weight distributions
+- **Parameter correlation matrices** with layer-wise decomposition and visualization
+- **Weight trajectory analysis** including displacement statistics and evolution patterns
+- **Specialized experimental workflows** recreating analysis from original research notebooks
+
+## Project Structure
+
+```
+dynamical-sgd/
+├── src/                    # Core source code
+│   └── models/
+│       └── spiral_classifier.py  # Main classifier implementation
+├── utils/                  # Utility modules
+│   ├── data_utils.py      # Data generation and processing
+│   ├── visualization.py   # Plotting and visualization
+│   ├── analysis.py        # Dynamical analysis tools
+│   └── metrics.py         # Metrics and evaluation
+├── config/                 # Configuration files
+│   ├── experiment_config.py # Configuration classes
+│   └── default_config.yaml # Default parameters
+├── analysis/              # Advanced research analysis tools
+│   ├── advanced_gradient_analysis.py  # KL divergence, distribution analysis
+│   ├── correlation_analysis.py        # Weight correlation and trajectories
+│   └── dynamics_experiments.py        # Specialized research experiments
+├── outputs/               # Experiment outputs (created automatically)
+├── docs/                  # Documentation
+├── run_experiment.py      # Main experiment script
+├── systematic_train.py    # Systematic parameter studies
+├── requirements.txt       # Python dependencies
+└── README.md             # This file
+```
+
+## Key Concepts
+
+### Dynamic Class Focus
+
+The training alternates between focusing on different classes with period T:
+- **Phase 1** (0 ≤ t < T/2): Weight for focus class increases linearly from 1 to w_max
+- **Phase 2** (T/2 ≤ t < T): Weight decreases linearly from w_max to 1
+- **Class Rotation**: Every T steps, focus moves to the next class
+
+### Analysis Methods
+
+1. **Macroscopic Analysis**:
+   - L₂ distance from origin
+   - Decision boundary evolution
+   - Training and test performance
+
+2. **Microscopic Analysis**:
+   - Layer-wise parameter changes
+   - Gradient distribution evolution
+   - Weight correlation matrices
+   - KL divergences between training phases
+
+3. **Dynamical Metrics**:
+   - Shannon entropy of weight distributions
+   - Cosine similarity between gradient patterns
+   - Effective rank of weight matrices
+
+## Results and Visualizations
+
+The system generates comprehensive visualizations:
+
+- **Decision Boundaries**: How classification regions evolve over training
+- **Training Curves**: Loss and accuracy progression with period markers
+- **Class Focus Dynamics**: Visualization of periodic class emphasis
+- **Weight Evolution**: Layer-wise distance from initialization
+- **Gradient Distributions**: Analysis of gradient patterns across training phases
+
+Example outputs are saved to `outputs/experiment_name_timestamp/`:
+- `config.yaml`: Experiment configuration
+- `results.pkl`: Training metrics and final accuracies
+- `training_curves.png`: Loss and accuracy plots
+- `decision_boundary.png`: Final classification regions
+- `class_focus_dynamics.png`: Dynamic class weighting visualization
+
+## Scientific Background
+
+This work is based on the hypothesis that neural network learning can be understood as a non-equilibrium physical process. Key insights:
+
+1. **Frustration Resolution**: Like physical systems with competing interactions, neural networks must resolve conflicts between different learning objectives.
+
+2. **Sequential Learning**: Dynamic class focus allows the network to learn different tasks sequentially while maintaining overall performance.
+
+3. **Internal Coordination**: Analysis reveals how different network components coordinate their changes to avoid destructive interference.
+
+4. **Emergent Organization**: Periodic training induces spontaneous organization patterns in the parameter space.
+
+## Research Applications
+
+This framework enables research into:
+
+- **Catastrophic Forgetting**: How dynamic training helps maintain performance on all classes
+- **Continual Learning**: Understanding how networks adapt to new tasks
+- **Transfer Learning**: Analyzing how learned representations transfer between related tasks
+- **Network Architecture**: Studying how architecture affects learning dynamics
+- **Optimization Landscapes**: Mapping the loss landscape under dynamic training
+
+## Contributing
+
+We welcome contributions! Please see `CONTRIBUTING.md` for guidelines. Key areas for contribution:
+
+- Additional analysis methods
+- New visualization techniques
+- Extended model architectures
+- Theoretical analysis tools
+- Performance optimizations
+
+## Citation
+
+If you use this code in your research, please cite:
+
+```bibtex
+@misc{dynamical_sgd_2024,
+  title={Dynamical SGD: Neural Network Learning as Non-Equilibrium Physics},
+  author={Nicolas Ratier Werbin},
+  year={2024},
+  url={https://github.com/NicolasRW/dynamical-sgd}
+}
+```
+
+## License
+
+This project is licensed under the MIT License - see the `LICENSE` file for details.
+
+## Author
+
+**Nicolas Ratier Werbin**
+- Email: nicolasratierwerbin@gmail.com
+- GitHub: [@NicolasRW](https://github.com/NicolasRW)
+
+## Acknowledgments
+
+This work explores the intersection of machine learning and statistical physics, building on concepts from:
+- Non-equilibrium statistical mechanics
+- Dynamical systems theory
+- Neural network optimization
+- Continual learning research
+
+---
+
+## Quick Examples
+
+### Run a Fast Test
+```bash
+# Small experiment for testing
+python run_experiment.py \
+    --override data.points_per_class=50 \
+    --override model.nn_width=20 \
+    --override training.total_steps=5000
+```
+
+### Large-Scale Experiment
+```bash
+# Comprehensive analysis
+python run_experiment.py \
+    --override model.nn_width=500 \
+    --override training.total_steps=150000 \
+    --override analysis.track_activations=true \
+    --override visualization.create_animations=true
+```
+
+### Disable Dynamics (Standard SGD)
+```bash
+# Compare with standard training
+python run_experiment.py \
+    --override dynamics.enable_dynamics=false
+```
+
+For more examples and tutorials, see the `docs/` directory.
 

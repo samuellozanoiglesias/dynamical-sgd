@@ -1,0 +1,512 @@
+"""
+Metrics and evaluation utilities for neural network analysis.
+
+This module provides functions for computing various metrics during training,
+including loss functions, accuracy measures, and custom dynamical metrics.
+"""
+
+import jax
+import jax.numpy as jnp
+from jax import jit
+from functools import partial
+from typing import Any, Dict, List, Tuple, Optional
+import numpy as np
+
+
+@partial(jit, static_argnums=(0,))
+def cross_entropy_loss(
+    model_fn: Any,
+    params: Any,
+    X: jnp.ndarray,
+    Y: jnp.ndarray,
+    l2_reg: float = 0.0
+) -> float:
+    """
+    Compute cross-entropy loss with optional L2 regularization.
+    
+    Args:
+        model_fn: Model function
+        params: Model parameters
+        X: Input features
+        Y: One-hot encoded labels
+        l2_reg: L2 regularization coefficient
+        
+    Returns:
+        Loss value
+    """
+    # Forward pass
+    predictions = model_fn(params, X)
+    
+    # Cross-entropy loss
+    log_probs = jax.nn.log_softmax(predictions)
+    ce_loss = -jnp.mean(jnp.sum(log_probs * Y, axis=-1))
+    
+    # Add L2 regularization
+    if l2_reg > 0:
+        l2_penalty = sum(
+            jnp.sum(param ** 2) 
+            for param in jax.tree_util.tree_leaves(params)
+        )
+        ce_loss += l2_reg * l2_penalty
+    
+    return ce_loss
+
+
+@partial(jit, static_argnums=(0,))
+def classification_accuracy(
+    model_fn: Any,
+    params: Any,
+    X: jnp.ndarray,
+    Y: jnp.ndarray
+) -> float:
+    """
+    Compute classification accuracy.
+    
+    Args:
+        model_fn: Model function
+        params: Model parameters
+        X: Input features
+        Y: One-hot encoded labels
+        
+    Returns:
+        Accuracy (fraction of correct predictions)
+    """
+    predictions = model_fn(params, X)
+    predicted_classes = jnp.argmax(predictions, axis=1)
+    true_classes = jnp.argmax(Y, axis=1)
+    return jnp.mean(predicted_classes == true_classes)
+
+
+def compute_per_class_accuracy(
+    model_fn: Any,
+    params: Any,
+    X: jnp.ndarray,
+    Y: jnp.ndarray
+) -> Dict[int, float]:
+    """
+    Compute accuracy for each class separately.
+    
+    Args:
+        model_fn: Model function
+        params: Model parameters
+        X: Input features
+        Y: One-hot encoded labels
+        
+    Returns:
+        Dictionary mapping class index to accuracy
+    """
+    predictions = model_fn(params, X)
+    predicted_classes = jnp.argmax(predictions, axis=1)
+    true_classes = jnp.argmax(Y, axis=1)
+    
+    num_classes = Y.shape[1]
+    per_class_acc = {}
+    
+    for class_idx in range(num_classes):
+        class_mask = true_classes == class_idx
+        if jnp.sum(class_mask) > 0:  # Avoid division by zero
+            class_correct = jnp.sum(
+                (predicted_classes == true_classes) & class_mask
+            )
+            class_total = jnp.sum(class_mask)
+            per_class_acc[class_idx] = float(class_correct / class_total)
+        else:
+            per_class_acc[class_idx] = 0.0
+    
+    return per_class_acc
+
+
+def compute_confusion_matrix(
+    model_fn: Any,
+    params: Any,
+    X: jnp.ndarray,
+    Y: jnp.ndarray
+) -> jnp.ndarray:
+    """
+    Compute confusion matrix.
+    
+    Args:
+        model_fn: Model function
+        params: Model parameters
+        X: Input features
+        Y: One-hot encoded labels
+        
+    Returns:
+        Confusion matrix of shape (num_classes, num_classes)
+    """
+    predictions = model_fn(params, X)
+    predicted_classes = jnp.argmax(predictions, axis=1)
+    true_classes = jnp.argmax(Y, axis=1)
+    
+    num_classes = Y.shape[1]
+    confusion_matrix = jnp.zeros((num_classes, num_classes))
+    
+    for i in range(num_classes):
+        for j in range(num_classes):
+            confusion_matrix = confusion_matrix.at[i, j].set(
+                jnp.sum((true_classes == i) & (predicted_classes == j))
+            )
+    
+    return confusion_matrix
+
+
+def compute_top_k_accuracy(
+    model_fn: Any,
+    params: Any,
+    X: jnp.ndarray,
+    Y: jnp.ndarray,
+    k: int = 2
+) -> float:
+    """
+    Compute top-k accuracy.
+    
+    Args:
+        model_fn: Model function
+        params: Model parameters
+        X: Input features
+        Y: One-hot encoded labels
+        k: Number of top predictions to consider
+        
+    Returns:
+        Top-k accuracy
+    """
+    predictions = model_fn(params, X)
+    true_classes = jnp.argmax(Y, axis=1)
+    
+    # Get top-k predictions
+    top_k_preds = jnp.argsort(predictions, axis=1)[:, -k:]
+    
+    # Check if true class is in top-k predictions
+    correct = jnp.any(top_k_preds == true_classes[:, None], axis=1)
+    
+    return jnp.mean(correct)
+
+
+def compute_calibration_metrics(
+    model_fn: Any,
+    params: Any,
+    X: jnp.ndarray,
+    Y: jnp.ndarray,
+    num_bins: int = 10
+) -> Dict[str, float]:
+    """
+    Compute calibration metrics (Expected Calibration Error, etc.).
+    
+    Args:
+        model_fn: Model function
+        params: Model parameters
+        X: Input features
+        Y: One-hot encoded labels
+        num_bins: Number of confidence bins
+        
+    Returns:
+        Dictionary with calibration metrics
+    """
+    predictions = model_fn(params, X)
+    probabilities = jax.nn.softmax(predictions)
+    
+    predicted_classes = jnp.argmax(probabilities, axis=1)
+    true_classes = jnp.argmax(Y, axis=1)
+    confidences = jnp.max(probabilities, axis=1)
+    correctness = (predicted_classes == true_classes).astype(float)
+    
+    # Create bins
+    bin_boundaries = jnp.linspace(0, 1, num_bins + 1)
+    bin_indices = jnp.digitize(confidences, bin_boundaries) - 1
+    bin_indices = jnp.clip(bin_indices, 0, num_bins - 1)
+    
+    # Compute ECE
+    ece = 0.0
+    total_samples = len(confidences)
+    
+    for bin_idx in range(num_bins):
+        bin_mask = bin_indices == bin_idx
+        bin_size = jnp.sum(bin_mask)
+        
+        if bin_size > 0:
+            bin_accuracy = jnp.mean(correctness[bin_mask])
+            bin_confidence = jnp.mean(confidences[bin_mask])
+            ece += (bin_size / total_samples) * jnp.abs(bin_accuracy - bin_confidence)
+    
+    # Compute MCE (Maximum Calibration Error)
+    mce = 0.0
+    for bin_idx in range(num_bins):
+        bin_mask = bin_indices == bin_idx
+        bin_size = jnp.sum(bin_mask)
+        
+        if bin_size > 0:
+            bin_accuracy = jnp.mean(correctness[bin_mask])
+            bin_confidence = jnp.mean(confidences[bin_mask])
+            mce = jnp.maximum(mce, jnp.abs(bin_accuracy - bin_confidence))
+    
+    return {
+        'expected_calibration_error': float(ece),
+        'maximum_calibration_error': float(mce),
+        'average_confidence': float(jnp.mean(confidences)),
+        'average_accuracy': float(jnp.mean(correctness))
+    }
+
+
+def compute_gradient_norm(gradients: Any) -> float:
+    """
+    Compute the L2 norm of gradients.
+    
+    Args:
+        gradients: Gradient pytree
+        
+    Returns:
+        L2 norm of gradients
+    """
+    flat_grads = jax.tree_util.tree_leaves(gradients)
+    grad_norm = jnp.sqrt(sum(jnp.sum(g ** 2) for g in flat_grads))
+    return float(grad_norm)
+
+
+def compute_parameter_norm(params: Any) -> float:
+    """
+    Compute the L2 norm of parameters.
+    
+    Args:
+        params: Parameter pytree
+        
+    Returns:
+        L2 norm of parameters
+    """
+    flat_params = jax.tree_util.tree_leaves(params)
+    param_norm = jnp.sqrt(sum(jnp.sum(p ** 2) for p in flat_params))
+    return float(param_norm)
+
+
+def compute_spectral_norm(weight_matrix: jnp.ndarray) -> float:
+    """
+    Compute spectral norm (largest singular value) of a weight matrix.
+    
+    Args:
+        weight_matrix: Weight matrix
+        
+    Returns:
+        Spectral norm
+    """
+    if weight_matrix.ndim != 2:
+        # Reshape or flatten if not 2D
+        weight_matrix = weight_matrix.reshape(weight_matrix.shape[0], -1)
+    
+    singular_values = jnp.linalg.svd(weight_matrix, compute_uv=False)
+    return float(jnp.max(singular_values))
+
+
+def compute_weight_distribution_stats(params: Any) -> Dict[str, float]:
+    """
+    Compute statistics of weight distributions.
+    
+    Args:
+        params: Model parameters
+        
+    Returns:
+        Dictionary with distribution statistics
+    """
+    flat_params = jax.tree_util.tree_leaves(params)
+    all_weights = jnp.concatenate([p.flatten() for p in flat_params])
+    
+    return {
+        'mean': float(jnp.mean(all_weights)),
+        'std': float(jnp.std(all_weights)),
+        'min': float(jnp.min(all_weights)),
+        'max': float(jnp.max(all_weights)),
+        'l2_norm': float(jnp.linalg.norm(all_weights)),
+        'sparsity': float(jnp.mean(jnp.abs(all_weights) < 1e-6))
+    }
+
+
+class MetricsTracker:
+    """
+    Class for tracking multiple metrics during training.
+    """
+    
+    def __init__(self, track_calibration: bool = False):
+        """
+        Initialize metrics tracker.
+        
+        Args:
+            track_calibration: Whether to track calibration metrics
+        """
+        self.track_calibration = track_calibration
+        self.metrics_history = {}
+        self.step = 0
+    
+    def update(
+        self,
+        model_fn: Any,
+        params: Any,
+        X_train: jnp.ndarray,
+        Y_train: jnp.ndarray,
+        X_test: Optional[jnp.ndarray] = None,
+        Y_test: Optional[jnp.ndarray] = None,
+        gradients: Optional[Any] = None,
+        l2_reg: float = 0.0
+    ) -> Dict[str, float]:
+        """
+        Update metrics for current step.
+        
+        Args:
+            model_fn: Model function
+            params: Current parameters
+            X_train: Training features
+            Y_train: Training labels
+            X_test: Optional test features
+            Y_test: Optional test labels
+            gradients: Optional gradients
+            l2_reg: L2 regularization coefficient
+            
+        Returns:
+            Dictionary with current metrics
+        """
+        current_metrics = {}
+        
+        # Training metrics
+        current_metrics['train_loss'] = float(
+            cross_entropy_loss(model_fn, params, X_train, Y_train, l2_reg)
+        )
+        current_metrics['train_accuracy'] = float(
+            classification_accuracy(model_fn, params, X_train, Y_train)
+        )
+        
+        # Test metrics
+        if X_test is not None and Y_test is not None:
+            current_metrics['test_loss'] = float(
+                cross_entropy_loss(model_fn, params, X_test, Y_test, l2_reg)
+            )
+            current_metrics['test_accuracy'] = float(
+                classification_accuracy(model_fn, params, X_test, Y_test)
+            )
+        
+        # Parameter metrics
+        current_metrics['parameter_norm'] = compute_parameter_norm(params)
+        weight_stats = compute_weight_distribution_stats(params)
+        current_metrics.update({f'weight_{k}': v for k, v in weight_stats.items()})
+        
+        # Gradient metrics
+        if gradients is not None:
+            current_metrics['gradient_norm'] = compute_gradient_norm(gradients)
+        
+        # Calibration metrics
+        if self.track_calibration and X_test is not None and Y_test is not None:
+            calibration_metrics = compute_calibration_metrics(
+                model_fn, params, X_test, Y_test
+            )
+            current_metrics.update(
+                {f'calibration_{k}': v for k, v in calibration_metrics.items()}
+            )
+        
+        # Store in history
+        for key, value in current_metrics.items():
+            if key not in self.metrics_history:
+                self.metrics_history[key] = []
+            self.metrics_history[key].append(value)
+        
+        self.step += 1
+        return current_metrics
+    
+    def get_history(self, metric_name: str) -> List[float]:
+        """
+        Get history of a specific metric.
+        
+        Args:
+            metric_name: Name of the metric
+            
+        Returns:
+            List of metric values over time
+        """
+        return self.metrics_history.get(metric_name, [])
+    
+    def get_all_metrics(self) -> Dict[str, List[float]]:
+        """
+        Get all tracked metrics.
+        
+        Returns:
+            Dictionary with all metric histories
+        """
+        return self.metrics_history.copy()
+    
+    def save_metrics(self, filepath: str) -> None:
+        """
+        Save metrics to file.
+        
+        Args:
+            filepath: Path to save metrics
+        """
+        import pickle
+        with open(filepath, 'wb') as f:
+            pickle.dump(self.metrics_history, f)
+    
+    def load_metrics(self, filepath: str) -> None:
+        """
+        Load metrics from file.
+        
+        Args:
+            filepath: Path to load metrics from
+        """
+        import pickle
+        with open(filepath, 'rb') as f:
+            self.metrics_history = pickle.load(f)
+
+
+def compute_class_separation_score(
+    model_fn: Any,
+    params: Any,
+    X: jnp.ndarray,
+    Y: jnp.ndarray
+) -> float:
+    """
+    Compute a score measuring how well classes are separated in the feature space.
+    
+    Args:
+        model_fn: Model function
+        params: Model parameters
+        X: Input features
+        Y: One-hot encoded labels
+        
+    Returns:
+        Class separation score (higher = better separation)
+    """
+    # Get model predictions/features (assuming last layer before softmax)
+    predictions = model_fn(params, X)
+    
+    true_classes = jnp.argmax(Y, axis=1)
+    num_classes = Y.shape[1]
+    
+    # Compute within-class and between-class distances
+    within_class_distances = []
+    between_class_distances = []
+    
+    for class_i in range(num_classes):
+        mask_i = true_classes == class_i
+        class_i_features = predictions[mask_i]
+        
+        if len(class_i_features) > 1:
+            # Within-class distances
+            class_i_center = jnp.mean(class_i_features, axis=0)
+            within_distances = jnp.linalg.norm(
+                class_i_features - class_i_center, axis=1
+            )
+            within_class_distances.extend(within_distances)
+        
+        for class_j in range(class_i + 1, num_classes):
+            mask_j = true_classes == class_j
+            class_j_features = predictions[mask_j]
+            
+            if len(class_i_features) > 0 and len(class_j_features) > 0:
+                # Between-class distances
+                class_i_center = jnp.mean(class_i_features, axis=0)
+                class_j_center = jnp.mean(class_j_features, axis=0)
+                between_distance = jnp.linalg.norm(class_i_center - class_j_center)
+                between_class_distances.append(between_distance)
+    
+    if within_class_distances and between_class_distances:
+        avg_within = jnp.mean(jnp.array(within_class_distances))
+        avg_between = jnp.mean(jnp.array(between_class_distances))
+        separation_score = avg_between / (avg_within + 1e-10)
+    else:
+        separation_score = 0.0
+    
+    return float(separation_score)

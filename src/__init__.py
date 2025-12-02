@@ -1,0 +1,1 @@
+"""Dynamical SGD package for studying neural network learning dynamics."""
