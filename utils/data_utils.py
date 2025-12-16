@@ -17,7 +17,9 @@ def generate_spiral_data(
     num_classes: int = 3,
     revolutions: float = 4.0,
     noise_std: float = 0.2,
-    random_seed: Optional[int] = None
+    random_seed: Optional[int] = None,
+    angular_offsets: Optional[List[float]] = None,
+    randomize_offsets: bool = False
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     Generate spiral dataset with multiple classes.
@@ -28,12 +30,31 @@ def generate_spiral_data(
         revolutions: Number of spiral revolutions
         noise_std: Standard deviation of angular noise
         random_seed: Random seed for reproducibility
+        angular_offsets: Custom angular offsets for each class in degrees (must have num_classes values)
+                        If None and randomize_offsets=False: uses uniform spacing (120°, 240° for 3 classes)
+                        If None and randomize_offsets=True: generates random offsets
+        randomize_offsets: If True and angular_offsets is None, generates random angular offsets
+                          This breaks the perfect 120° symmetry for neural collapse experiments
         
     Returns:
         Tuple of (features, labels) where features are (N, 2) and labels are one-hot (N, num_classes)
     """
     key = random.PRNGKey(random_seed if random_seed is not None else 0)
     N, C, pi = points_per_class, num_classes, jnp.pi
+    
+    # Determine angular offsets for each spiral
+    if angular_offsets is not None:
+        if len(angular_offsets) != C:
+            raise ValueError(f"angular_offsets must have {C} values, got {len(angular_offsets)}")
+        # Convert from degrees to radians
+        offsets = jnp.array(angular_offsets) * pi / 180.0
+    elif randomize_offsets:
+        # Generate random offsets in [0, 2π) to break symmetry
+        key, subkey = random.split(key)
+        offsets = random.uniform(subkey, (C,), minval=0.0, maxval=2.0 * pi)
+    else:
+        # Default: uniform spacing (creates 120° for 3 classes, etc.)
+        offsets = jnp.array([2 * pi * j / C for j in range(C)])
     
     # Initialize arrays
     X = jnp.zeros((N * C, 2))
@@ -45,13 +66,13 @@ def generate_spiral_data(
         
         # Spiral parameters
         r = jnp.linspace(0., 1, N)  # radius
-        omega = 2 * pi / C  # angular offset
+        omega = offsets[j]  # angular offset for this class
         theta_max = revolutions * pi
         
         # Generate angles with noise
         key, subkey = random.split(key)
         noise = random.normal(subkey, (N,)) * noise_std
-        angles = jnp.linspace(omega * j, omega * j + theta_max, N) + noise
+        angles = jnp.linspace(omega, omega + theta_max, N) + noise
         
         # Convert to Cartesian coordinates
         x_coords = r * jnp.cos(angles)

@@ -165,6 +165,7 @@ def plot_training_curves(
     accuracies: List[float],
     test_losses: Optional[List[float]] = None,
     test_accuracies: Optional[List[float]] = None,
+    metric_steps: Optional[List[int]] = None,
     period_length: Optional[int] = None,
     title: str = "Training Curves",
     figsize: Tuple[int, int] = (15, 5)
@@ -177,14 +178,48 @@ def plot_training_curves(
         accuracies: Training accuracies
         test_losses: Optional test losses
         test_accuracies: Optional test accuracies
+        metric_steps: Actual step numbers corresponding to metrics (if None, uses indices)
         period_length: If provided, add vertical lines at period boundaries
         title: Plot title
         figsize: Figure size
     """
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
     
+    # Expand metrics to fill all intermediate steps (step function)
+    if metric_steps is not None and len(metric_steps) > 0:
+        # Create expanded arrays where metrics are held constant between validation intervals
+        max_step = max(metric_steps)
+        expanded_steps = list(range(max_step + 1))
+        expanded_losses = []
+        expanded_accuracies = []
+        expanded_test_losses = []
+        expanded_test_accuracies = []
+        
+        for step in expanded_steps:
+            # Find the most recent metric_step <= current step
+            idx = 0
+            for i, metric_step in enumerate(metric_steps):
+                if metric_step <= step:
+                    idx = i
+                else:
+                    break
+            
+            expanded_losses.append(losses[idx])
+            expanded_accuracies.append(accuracies[idx])
+            if test_losses is not None and idx < len(test_losses):
+                expanded_test_losses.append(test_losses[idx])
+            if test_accuracies is not None and idx < len(test_accuracies):
+                expanded_test_accuracies.append(test_accuracies[idx])
+        
+        steps = expanded_steps
+        losses = expanded_losses
+        accuracies = expanded_accuracies
+        test_losses = expanded_test_losses if expanded_test_losses else None
+        test_accuracies = expanded_test_accuracies if expanded_test_accuracies else None
+    else:
+        steps = range(len(losses))
+    
     # Plot losses
-    steps = range(len(losses))
     ax1.plot(steps, losses, 'b-', label='Training Loss', alpha=0.8, linewidth=1.5)
     
     if test_losses is not None:
@@ -212,9 +247,10 @@ def plot_training_curves(
     ax2.grid(True, alpha=0.3)
     
     # Add period markers if specified
-    if period_length is not None:
+    if period_length is not None and metric_steps is not None:
+        max_step = max(metric_steps)
         for ax in [ax1, ax2]:
-            for i in range(1, len(losses) // period_length + 1):
+            for i in range(1, max_step // period_length + 1):
                 ax.axvline(x=i * period_length, color='gray', linestyle=':', alpha=0.5)
     
     plt.suptitle(title, fontsize=16)

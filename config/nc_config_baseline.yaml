@@ -1,0 +1,68 @@
+# Neural Collapse Experiment Configuration
+# Used for both WITH and WITHOUT dynamic class focus (bumping) experiments
+# The enable_dynamics parameter is overridden by run_nc_experiment.py
+
+# Data configuration
+data:
+  points_per_class: 1000
+  num_classes: 3
+  revolutions: 4.0
+  noise_std: 0.2
+  test_ratio: 0.25
+  random_seed: 42
+  randomize_offsets: true  # If true, generates random angular offsets (breaks 120° symmetry)
+  angular_offsets: [0, 90, 180]     # Custom angular offsets in degrees [0, 120, 240] or null for default
+
+# Model architecture
+model:
+  nn_width: 100  # Hidden layer width (feature dimension for NC analysis)
+  activation: "relu"
+  use_bias: true
+
+# Training configuration
+training:
+  total_steps: 5000  # Long training to observe terminal phase
+  batch_size: 200
+  validation_interval: 100
+
+# Optimizer configuration
+optimizer:
+  optimizer_type: "adam"
+  learning_rate: 0.001
+  l2_reg: 0.0
+
+# Dynamic class focus (bumping) configuration
+dynamics:
+  enable_dynamics: true  # Overridden by run_nc_experiment.py (true/false)
+  period_length: 2000    # Period T for class focus cycling
+  w_max: 50           # Maximum class weight (amplitude)
+
+# Analysis configuration
+analysis:
+  track_weight_diff: false
+  weight_diff_step_interval: 100
+  track_neural_collapse: true  # ENABLE Neural Collapse tracking
+  nc_snapshot_interval: 2500   # Capture snapshot every 2500 steps
+
+# Visualization configuration
+visualization:
+  real_time_visualization: false
+  vis_step_interval: 1000
+  plot_style: "seaborn-v0_8-darkgrid"
+  figure_dpi: 300
+  save_decision_boundaries: true
+  save_training_curves: true
+  save_nc_visualizations: true  # Save NC 3D visualizations
+
+# Output configuration
+output:
+  output_dir: "outputs"  # Base directory (experiment subfolders created automatically)
+  experiment_name: "nc_experiment"  # Overridden by run_nc_experiment.py
+  save_metrics: true
+  save_final_model: true
+  save_checkpoints: false
+  checkpoint_interval: 10000
+
+# Device configuration
+device: "auto"  # "auto", "gpu", or "cpu"
+random_seed: 42

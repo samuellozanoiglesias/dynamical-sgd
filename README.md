@@ -240,10 +240,11 @@ The system generates comprehensive visualizations:
 
 Example outputs are saved to `outputs/experiment_name_timestamp/`:
 - `config.yaml`: Experiment configuration
-- `results.pkl`: Training metrics and final accuracies
+- `results.txt`: Training metrics and final accuracies (human-readable)
 - `training_curves.png`: Loss and accuracy plots
 - `decision_boundary.png`: Final classification regions
 - `class_focus_dynamics.png`: Dynamic class weighting visualization
+- `final_model_params.pkl`: Final model parameters (if save_final_model=true)
 
 ## Scientific Background
 

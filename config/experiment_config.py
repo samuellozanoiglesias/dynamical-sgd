@@ -26,6 +26,8 @@ class DataConfig:
     augmentation_noise_std: float = 0.05
     augmentation_rotation_range: float = 0.1
     random_seed: Optional[int] = 0
+    randomize_offsets: bool = False  # Generate random angular offsets for spirals
+    angular_offsets: Optional[List[float]] = None  # Custom angular offsets in degrees
 
 
 @dataclass
@@ -70,12 +72,12 @@ class TrainingConfig:
     
     total_steps: int = 75000
     batch_size: int = 50
-    n_steps_per_epoch: int = 1
     validation_interval: int = 100
     checkpoint_interval: int = 1000
     early_stopping: bool = False
     early_stopping_patience: int = 10
     early_stopping_min_delta: float = 1e-4
+    random_seed: Optional[int] = None  # Random seed for reproducibility
 
 
 @dataclass
@@ -93,6 +95,8 @@ class AnalysisConfig:
     compute_kl_divergences: bool = True
     compute_correlations: bool = True
     track_activations: bool = False
+    track_neural_collapse: bool = False
+    nc_snapshot_interval: int = 2500
 
 
 @dataclass
@@ -111,6 +115,7 @@ class VisualizationConfig:
     plot_style: str = "seaborn"
     figure_format: str = "png"
     figure_dpi: int = 150
+    save_nc_visualizations: bool = True
 
 
 @dataclass
@@ -119,7 +124,10 @@ class OutputConfig:
     
     output_dir: str = "outputs"
     experiment_name: str = "dynamical_sgd_experiment"
+    config_name: Optional[str] = None  # Config file name for nested folder structure
+    experiment_timestamp: Optional[str] = None  # For paired experiments
     save_checkpoints: bool = True
+    checkpoint_interval: int = 10000
     save_final_model: bool = True
     save_metrics: bool = True
     save_analysis_data: bool = True

@@ -41,13 +41,12 @@ def cross_entropy_loss(
     log_probs = jax.nn.log_softmax(predictions)
     ce_loss = -jnp.mean(jnp.sum(log_probs * Y, axis=-1))
     
-    # Add L2 regularization
-    if l2_reg > 0:
-        l2_penalty = sum(
-            jnp.sum(param ** 2) 
-            for param in jax.tree_util.tree_leaves(params)
-        )
-        ce_loss += l2_reg * l2_penalty
+    # Add L2 regularization (always compute, harmless when l2_reg=0)
+    l2_penalty = sum(
+        jnp.sum(param ** 2) 
+        for param in jax.tree_util.tree_leaves(params)
+    )
+    ce_loss = ce_loss + l2_reg * l2_penalty
     
     return ce_loss
 

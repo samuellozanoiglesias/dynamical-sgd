@@ -16,6 +16,8 @@ data:
   augmentation_noise_std: 0.05
   augmentation_rotation_range: 0.1
   random_seed: 0
+  randomize_offsets: false  # If true, generates random angular offsets (breaks 120° symmetry)
+  angular_offsets: null     # Custom angular offsets in degrees [0, 120, 240] or null for default
 
 # Model configuration
 model:
@@ -48,7 +50,6 @@ dynamics:
 training:
   total_steps: 75000
   batch_size: 50
-  n_steps_per_epoch: 1
   validation_interval: 100
   checkpoint_interval: 1000
   early_stopping: false
