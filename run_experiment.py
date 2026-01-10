@@ -32,7 +32,7 @@ from analysis.neural_collapse import (
     NeuralCollapseAnalyzer, NeuralCollapseSnapshot, create_video_from_images
 )
 from analysis.neural_collapse_integration import (
-    extract_penultimate_features, plot_nc_metrics_evolution
+    extract_penultimate_features, plot_nc_metrics_evolution, plot_angle_convergence_evolution
 )
 import jax
 import jax.numpy as jnp
@@ -634,6 +634,9 @@ def main():
             
             # Plot NC metrics evolution
             plot_nc_metrics_evolution(nc_metrics_history, output_dir)
+            
+            # Plot angle convergence evolution (true geometric angles in R^p)
+            plot_angle_convergence_evolution(nc_analyzer, output_dir)
             
             # Visualize selected snapshots with FIXED axes for proper comparison
             if config.visualization.save_nc_visualizations:

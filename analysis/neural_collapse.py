@@ -12,13 +12,31 @@ Neural Collapse refers to the phenomenon where, during the terminal phase of tra
 3. NC3 (Self-Duality): Classifiers and class means become dual to each other
 4. NC4 (Simplification to NCC): Decision boundaries simplify to nearest class center
 
+🔴 CRITICAL MATHEMATICAL PRINCIPLES 🔴
+This implementation follows strict geometric principles to avoid measurement artifacts:
+
+1️⃣ Rule 1 — Never measure geometry after adaptive projection
+   ✅ All NC metrics computed in ORIGINAL feature space R^p
+   ✅ Projection used ONLY for visualization
+   ❌ Never compute angles/distances on projected data
+
+2️⃣ Rule 2 — ETF is a target, not a coordinate system  
+   ✅ Fixed theoretical Simplex ETF for comparison
+   ✅ Rotation-invariant alignment via Procrustes analysis
+   ❌ Never use ETF to define projection axes
+
+3️⃣ Rule 3 — Normalization only after centering
+   ✅ Center class means first: μ_c ← μ_c - mean(μ)
+   ✅ Then normalize: μ_c ← μ_c / ||μ_c||
+   ❌ Never: project → normalize → measure
+
 This module provides tools to:
 - Extract last-layer features, class means, and classifiers during training
-- Compute the Simplex ETF (theoretical optimal configuration)
-- Project high-dimensional features to low-dimensional subspace for visualization
-- Recreate Figure 1 from the Neural Collapse paper
+- Compute NC metrics in original R^p space (mathematically correct)
+- Project to low-dimensional subspace for visualization only
+- Recreate Figure 1 from the Neural Collapse paper with correct geometry
 
-Author: Samuel Lozano Iglesias
+Author: Samuel Lozano Iglesias  
 Email: samuel.lozano@ucm.es
 """
 
@@ -118,9 +136,15 @@ class NeuralCollapseAnalyzer:
         # Assuming model_fn can return features when requested
         # We'll need to modify the model to expose features
         features = self._extract_features(model_fn, params, X)
+
+        # Compute global means of features (average of all feature vectors)
+        global_mean = jnp.mean(features, axis=0)
         
-        # Compute class means
+        # Compute class means (average feature vector per class)
         class_means = self._compute_class_means(features, labels)
+
+        # Compute centered means
+        centered_means = class_means - global_mean
         
         # Extract classifier weights (last layer weights) and biases
         classifiers, biases = self._extract_classifiers(params)
@@ -199,13 +223,15 @@ class NeuralCollapseAnalyzer:
         # For JAX stax models, params is a list of (W, b) tuples
         # Last layer weights are params[-1][0], shape (p, C)
         # Last layer biases are params[-1][1], shape (C,)
+        # Antelast layer biases are params[-2][1], shape (p,)
         last_layer_weights = params[-1][0]
         last_layer_biases = params[-1][1]
+        antelast_layer_biases = params[-2][1]
         
         # Transpose weights to (C, p) for easier handling
         classifiers = last_layer_weights.T
         
-        return classifiers, last_layer_biases
+        return classifiers, last_layer_biases, antelast_layer_biases
     
     def compute_simplex_etf(self, num_classes: Optional[int] = None) -> jnp.ndarray:
         """
@@ -259,28 +285,30 @@ class NeuralCollapseAnalyzer:
         """
         Project features, class means, and classifiers to low-dimensional subspace.
         
-        Uses SVD of class means to find the principal subspace where Neural Collapse
-        occurs. This is the key technique for visualizing high-dimensional features
-        in R^p as if they were in R^C.
+        ⚠️  VISUALIZATION ONLY - NEVER COMPUTE METRICS ON PROJECTED DATA ⚠️
         
-        The Simplex ETF is computed in the target dimension and serves as the
-        FIXED reference frame. All vectors are projected to this subspace and
-        optionally normalized to unit length for angle visualization.
+        This function is PURELY for visualization purposes. All Neural Collapse
+        metrics MUST be computed in the original feature space R^p before calling
+        this function. Projection creates visual artifacts that would make metrics
+        meaningless.
+        
+        Uses SVD of class means to find the principal subspace for visualization.
+        The projection basis is fixed per snapshot to avoid adaptive artifacts.
         
         Args:
             features: Feature vectors (N, p)
             class_means: Class mean vectors (C, p)
             classifiers: Classifier weight vectors (C, p)
             target_dim: Target dimension for visualization (default: 3 for 3D plots)
-            normalize: If True, normalize projected class means and classifiers to unit length
+            normalize: If True, normalize projected vectors for better visualization
             
         Returns:
             Tuple of (projected_features, projected_means, projected_classifiers, etf, basis)
-            where:
+            where all outputs are for VISUALIZATION ONLY:
             - projected_features: (N, target_dim)
-            - projected_means: (C, target_dim) - normalized if normalize=True
-            - projected_classifiers: (C, target_dim) - normalized if normalize=True
-            - etf: (C, target_dim) - Simplex ETF in the projected space (unit normalized)
+            - projected_means: (C, target_dim)
+            - projected_classifiers: (C, target_dim)
+            - etf: (C, target_dim) - Theoretical ETF for visual reference
             - basis: (p, target_dim) - projection matrix
         """
         # Center the class means by subtracting their global centroid
@@ -366,7 +394,7 @@ class NeuralCollapseAnalyzer:
         cos_angle = jnp.clip(cos_angle, -1.0, 1.0)
         return float(jnp.arccos(cos_angle) * 180.0 / jnp.pi)
     
-    def compute_pairwise_angles(self, vectors: jnp.ndarray) -> jnp.ndarray:
+    def compute_pairwise_angles(self, vectors: jnp.ndarray, vector_name: str):
         """
         Compute all pairwise angles between a set of vectors.
         
@@ -378,11 +406,120 @@ class NeuralCollapseAnalyzer:
         """
         N = vectors.shape[0]
         angles = []
+        pair_names = []
         for i in range(N):
             for j in range(i+1, N):
                 angle = self.compute_angle_degrees(vectors[i], vectors[j])
                 angles.append(angle)
-        return jnp.array(angles)
+                pair_names.append(f"{vector_name}_{i}-{vector_name}_{j}")
+        
+        angles = jnp.array(angles)
+
+        # Theoretical optimal angle for C classes
+        if N > 1:
+            optimal_cos = -1.0 / (N - 1)
+            optimal_angle = float(jnp.arccos(optimal_cos) * 180.0 / jnp.pi)
+        else:
+            optimal_angle = 0.0
+        
+        return {
+            'mean_angle': float(jnp.mean(angles)) if len(angles) > 0 else 0.0,
+            'std_angle': float(jnp.std(angles)) if len(angles) > 0 else 0.0,
+            'min_angle': float(jnp.min(angles)) if len(angles) > 0 else 0.0,
+            'max_angle': float(jnp.max(angles)) if len(angles) > 0 else 0.0,
+            'optimal_angle': optimal_angle,
+            'angle_deviation': float(jnp.mean(jnp.abs(angles - optimal_angle))) if len(angles) > 0 else 0.0,
+            'all_angles': angles.tolist(),
+            'pair_names': pair_names
+        }
+    
+    def compute_all_angles_in_original_space(self, snapshot: NeuralCollapseSnapshot) -> Dict[str, Dict[str, float]]:
+        """
+        Compute true geometric angles for ALL components in original feature space R^p.
+        
+        This computes angles for:
+        1. Class means (should converge to simplex angles)
+        2. Classifiers (should converge to simplex angles) 
+        3. Biases (typically anti-aligned, ~180° apart)
+        4. Alignment between class means and classifiers (should → 0°)
+        
+        For perfect Neural Collapse simplex configuration:
+        - 3 classes: 120° between all pairs
+        - 4 classes: ~109.47° (tetrahedral angles)
+        - General C classes: arccos(-1/(C-1))
+        
+        Args:
+            snapshot: Network state snapshot
+            
+        Returns:
+            Dictionary with angle statistics for each component type
+        """        
+        # 1. Class means angles
+        class_means_angles = self.compute_pairwise_angles(snapshot.class_means, "mean")
+        
+        # 2. Classifiers angles  
+        classifiers_angles = self.compute_pairwise_angles(snapshot.classifiers, "classifier")
+        
+        # 3. Bias angles (note: biases are 1D, so we need to embed them in feature space)
+        # For neural collapse, biases tend to anti-align (opposite directions)
+        # We'll treat each bias as a vector pointing in the direction of its classifier
+        bias_vectors = jnp.zeros_like(snapshot.classifiers)
+        for i in range(snapshot.num_classes):
+            # Bias direction aligned with classifier direction but scaled by bias magnitude
+            classifier_dir = snapshot.classifiers[i] / (jnp.linalg.norm(snapshot.classifiers[i]) + 1e-8)
+            bias_vectors = bias_vectors.at[i].set(classifier_dir * snapshot.biases[i])
+        
+        bias_angles = self.compute_pairwise_angles(bias_vectors, "bias")
+        
+        # 4. Alignment between class means and classifiers (should be 0° for perfect NC)
+        centered_means = snapshot.class_means - jnp.mean(snapshot.class_means, axis=0, keepdims=True)
+        centered_classifiers = snapshot.classifiers - jnp.mean(snapshot.classifiers, axis=0, keepdims=True)
+        
+        # Normalize both
+        mean_norms = jnp.linalg.norm(centered_means, axis=1, keepdims=True)
+        classifier_norms = jnp.linalg.norm(centered_classifiers, axis=1, keepdims=True)
+        
+        normalized_means = centered_means / (mean_norms + 1e-8)
+        normalized_classifiers = centered_classifiers / (classifier_norms + 1e-8)
+        
+        # Compute alignment angles (same class mean vs same class classifier)
+        alignment_angles = []
+        alignment_names = []
+        for i in range(snapshot.num_classes):
+            cos_angle = jnp.dot(normalized_means[i], normalized_classifiers[i])
+            cos_angle = jnp.clip(cos_angle, -1.0, 1.0)
+            angle_deg = float(jnp.arccos(cos_angle) * 180.0 / jnp.pi)
+            alignment_angles.append(angle_deg)
+            alignment_names.append(f"mean_{i}-classifier_{i}")
+        
+        alignment_angles = jnp.array(alignment_angles)
+        
+        alignment_stats = {
+            'mean_angle': float(jnp.mean(alignment_angles)),
+            'std_angle': float(jnp.std(alignment_angles)),
+            'min_angle': float(jnp.min(alignment_angles)),
+            'max_angle': float(jnp.max(alignment_angles)),
+            'optimal_angle': 0.0,  # Perfect alignment should be 0°
+            'angle_deviation': float(jnp.mean(jnp.abs(alignment_angles - 0.0))),
+            'all_angles': alignment_angles.tolist(),
+            'pair_names': alignment_names
+        }
+        
+        return {
+            'class_means': class_means_angles,
+            'classifiers': classifiers_angles, 
+            'biases': bias_angles,
+            'mean_classifier_alignment': alignment_stats
+        }
+    
+    def compute_angles_in_original_space(self, snapshot: NeuralCollapseSnapshot) -> Dict[str, float]:
+        """
+        Backward compatibility wrapper - returns just class means angles.
+        
+        For full analysis, use compute_all_angles_in_original_space().
+        """
+        all_angles = self.compute_all_angles_in_original_space(snapshot)
+        return all_angles['class_means']
     
     def compute_nc_metrics(self, snapshot: NeuralCollapseSnapshot) -> Dict[str, float]:
         """
@@ -674,26 +811,15 @@ class NeuralCollapseAnalyzer:
                 c=orange_shades[i], linewidth=3.5, alpha=0.8, linestyle='--'
             )
         
-        # Compute angles between different components for detailed analysis
+        # Compute TRUE angles in original feature space (all components)
+        all_angles = self.compute_all_angles_in_original_space(snapshot)
+        
         if n_vis_classes >= 2:
-            # Angles between class means
-            mean_angles = self.compute_pairwise_angles(proj_means)
-            avg_mean_angle = float(jnp.mean(mean_angles)) if len(mean_angles) > 0 else 0.0
-            
-            # Angles between classifiers
-            classifier_angles = self.compute_pairwise_angles(proj_classifiers)
-            avg_classifier_angle = float(jnp.mean(classifier_angles)) if len(classifier_angles) > 0 else 0.0
-            
-            # Angles between biases
-            bias_angles = self.compute_pairwise_angles(proj_biases)
-            avg_bias_angle = float(jnp.mean(bias_angles)) if len(bias_angles) > 0 else 0.0
-            
-            # Alignment: angle between class mean and its classifier (should be ~0°)
-            alignment_angles = jnp.array([
-                self.compute_angle_degrees(proj_means[i], proj_classifiers[i])
-                for i in range(n_vis_classes)
-            ])
-            avg_alignment = float(jnp.mean(alignment_angles))
+            # Extract angles for all components  
+            means_angles = all_angles['class_means']
+            classifiers_angles = all_angles['classifiers']
+            biases_angles = all_angles['biases']
+            alignment_angles = all_angles['mean_classifier_alignment']
         
         # Origin marker
         ax.scatter([0], [0], [0], c='black', s=100, marker='x', linewidths=3,
@@ -707,9 +833,12 @@ class NeuralCollapseAnalyzer:
         if title is None:
             if n_vis_classes >= 2:
                 title = f'Neural Collapse at Step {snapshot.epoch}\n'
-                title += f'Means: {avg_mean_angle:.1f}° | Classifiers: {avg_classifier_angle:.1f}° | '
-                title += f'Biases: {avg_bias_angle:.1f}° (Target: 120°)\n'
-                title += f'Mean-Classifier Alignment: {avg_alignment:.1f}° (Target: 0°)'
+                title += f'TRUE Angles in R^{self.feature_dim}: '
+                title += f'Means: {means_angles["mean_angle"]:.1f}° | '
+                title += f'Classifiers: {classifiers_angles["mean_angle"]:.1f}° | '
+                title += f'Biases: {biases_angles["mean_angle"]:.1f}°\n'
+                title += f'Alignment: {alignment_angles["mean_angle"]:.1f}° | '
+                title += f'Targets: {means_angles["optimal_angle"]:.1f}° (simplex), 0° (alignment)'
             else:
                 title = f'Neural Collapse at Step {snapshot.epoch}'
         ax.set_title(title, fontsize=13, fontweight='bold', pad=20)
@@ -921,34 +1050,27 @@ class NeuralCollapseAnalyzer:
         # Add origin marker
         ax.scatter([0], [0], c='black', s=100, marker='x', linewidths=3, zorder=9)
         
-        # Compute detailed angle measurements
-        if n_vis_classes >= 2:
-            # Angles between class means
-            mean_angles = self.compute_pairwise_angles(proj_means)
-            avg_mean_angle = float(jnp.mean(mean_angles)) if len(mean_angles) > 0 else 0.0
-            
-            # Angles between classifiers
-            classifier_angles = self.compute_pairwise_angles(proj_classifiers)
-            avg_classifier_angle = float(jnp.mean(classifier_angles)) if len(classifier_angles) > 0 else 0.0
-            
-            # Angles between biases
-            bias_angles = self.compute_pairwise_angles(proj_biases)
-            avg_bias_angle = float(jnp.mean(bias_angles)) if len(bias_angles) > 0 else 0.0
-            
-            # Alignment: angle between class mean and its classifier (should be ~0°)
-            alignment_angles = jnp.array([
-                self.compute_angle_degrees(proj_means[i], proj_classifiers[i])
-                for i in range(n_vis_classes)
-            ])
-            avg_alignment = float(jnp.mean(alignment_angles))
+        # Compute TRUE angles in original feature space (all components)
+        all_angles = self.compute_all_angles_in_original_space(snapshot)
         
-        # Set title with comprehensive angle information
+        if n_vis_classes >= 2:
+            # Extract angles for all components
+            means_angles = all_angles['class_means']
+            classifiers_angles = all_angles['classifiers']
+            biases_angles = all_angles['biases']
+            alignment_angles = all_angles['mean_classifier_alignment']
+        
+        # Set title with comprehensive TRUE angle information
         if title is None:
             if n_vis_classes >= 2:
                 title = f'Neural Collapse (2D View) - Step {snapshot.epoch}\n'
-                title += f'Means: {avg_mean_angle:.1f}° | Classifiers: {avg_classifier_angle:.1f}° | '
-                title += f'Biases: {avg_bias_angle:.1f}° (Target: 120°)\n'
-                title += f'Mean-Classifier Alignment: {avg_alignment:.1f}° (Target: 0°)'
+                title += f'TRUE Angles in R^{self.feature_dim}: '
+                title += f'Means: {means_angles["mean_angle"]:.1f}° | '
+                title += f'Classifiers: {classifiers_angles["mean_angle"]:.1f}° | '
+                title += f'Biases: {biases_angles["mean_angle"]:.1f}°\n'
+                title += f'Mean-Classifier Alignment: {alignment_angles["mean_angle"]:.1f}° | '
+                title += f'Target: {means_angles["optimal_angle"]:.1f}° (simplex), 0° (alignment)\n'
+                title += '⚠️ 2D view angles are projection artifacts - TRUE angles shown above'
             else:
                 title = f'Neural Collapse (2D View) - Step {snapshot.epoch}'
         ax.set_title(title, fontsize=12, fontweight='bold', pad=20)

@@ -5,6 +5,16 @@ This module extends the SpiralClassifier to capture Neural Collapse snapshots
 during training and provides utilities for analyzing and visualizing the
 Neural Collapse phenomenon.
 
+🔴 MATHEMATICALLY CORRECTED IMPLEMENTATION 🔴
+This module ensures all Neural Collapse metrics are computed in the original 
+feature space R^p, avoiding projection artifacts that would make measurements
+meaningless. Projections are used ONLY for visualization purposes.
+
+The key functions:
+- extract_penultimate_features(): Gets features from original R^p space
+- plot_nc_metrics_evolution(): Plots metrics computed in R^p (not projected)
+- All visualization functions clearly indicate when angles are projection artifacts
+
 Usage:
     from analysis.neural_collapse_integration import train_with_neural_collapse
     
@@ -53,6 +63,9 @@ def plot_nc_metrics_evolution(nc_metrics_history: List[Tuple[int, dict]], output
     """
     Plot the evolution of Neural Collapse metrics over training.
     
+    ✅ These metrics are computed in ORIGINAL feature space R^p, not after projection.
+    This ensures we're measuring the true geometric properties of Neural Collapse.
+    
     Args:
         nc_metrics_history: List of (step, metrics_dict) tuples
         output_dir: Directory to save the plot
@@ -68,7 +81,7 @@ def plot_nc_metrics_evolution(nc_metrics_history: List[Tuple[int, dict]], output
     axes[0].plot(steps, nc1, 'o-', linewidth=2, markersize=8, color='#2E86AB')
     axes[0].set_xlabel('Training Step', fontsize=12)
     axes[0].set_ylabel('Within-Class Variance', fontsize=12)
-    axes[0].set_title('NC1: Variability Collapse', fontsize=14, fontweight='bold')
+    axes[0].set_title('NC1: Variability Collapse\n(computed in R^p)', fontsize=14, fontweight='bold')
     axes[0].grid(True, alpha=0.3)
     axes[0].set_yscale('log')
     
@@ -76,7 +89,7 @@ def plot_nc_metrics_evolution(nc_metrics_history: List[Tuple[int, dict]], output
     axes[1].plot(steps, nc2, 'o-', linewidth=2, markersize=8, color='#06A77D')
     axes[1].set_xlabel('Training Step', fontsize=12)
     axes[1].set_ylabel('ETF Alignment', fontsize=12)
-    axes[1].set_title('NC2: Convergence to Simplex ETF', fontsize=14, fontweight='bold')
+    axes[1].set_title('NC2: Convergence to Simplex ETF\n(computed in R^p)', fontsize=14, fontweight='bold')
     axes[1].grid(True, alpha=0.3)
     axes[1].axhline(y=1.0, color='r', linestyle='--', alpha=0.5, label='Perfect alignment')
     axes[1].legend()
@@ -85,7 +98,7 @@ def plot_nc_metrics_evolution(nc_metrics_history: List[Tuple[int, dict]], output
     axes[2].plot(steps, nc3, 'o-', linewidth=2, markersize=8, color='#D62246')
     axes[2].set_xlabel('Training Step', fontsize=12)
     axes[2].set_ylabel('Cosine Similarity', fontsize=12)
-    axes[2].set_title('NC3: Self-Duality', fontsize=14, fontweight='bold')
+    axes[2].set_title('NC3: Self-Duality\n(computed in R^p)', fontsize=14, fontweight='bold')
     axes[2].grid(True, alpha=0.3)
     axes[2].axhline(y=1.0, color='r', linestyle='--', alpha=0.5, label='Perfect alignment')
     axes[2].legend()
@@ -93,6 +106,178 @@ def plot_nc_metrics_evolution(nc_metrics_history: List[Tuple[int, dict]], output
     plt.tight_layout()
     plt.savefig(output_dir / 'nc_metrics_evolution.png', dpi=300, bbox_inches='tight')
     plt.show()
+
+
+def plot_angle_convergence_evolution(nc_analyzer: NeuralCollapseAnalyzer, output_dir: Path):
+    """
+    Plot the evolution of ALL true geometric angles over training.
+    
+    Shows convergence for:
+    1. Class Means (should → simplex angles: 120° for 3 classes, etc.)
+    2. Classifiers (should → simplex angles: same as means)  
+    3. Biases (typically anti-aligned, ~180° apart)
+    4. Mean-Classifier Alignment (should → 0°)
+    
+    ✅ All angles computed in ORIGINAL feature space R^p (mathematically correct)
+    
+    Args:
+        nc_analyzer: NeuralCollapseAnalyzer with snapshots
+        output_dir: Directory to save the plot
+    """
+    if not nc_analyzer.snapshots:
+        print("No snapshots available for angle analysis")
+        return
+    
+    # Extract angle data from all snapshots for ALL components
+    epochs = []
+    
+    # Data for each component type
+    means_data = {'mean_angles': [], 'deviations': [], 'optimal': [], 'all_angles': []}
+    classifiers_data = {'mean_angles': [], 'deviations': [], 'optimal': [], 'all_angles': []}  
+    biases_data = {'mean_angles': [], 'deviations': [], 'optimal': [], 'all_angles': []}
+    alignment_data = {'mean_angles': [], 'deviations': [], 'optimal': [], 'all_angles': []}
+    
+    for snapshot in nc_analyzer.snapshots:
+        all_angles = nc_analyzer.compute_all_angles_in_original_space(snapshot)
+        
+        epochs.append(snapshot.epoch)
+        
+        # Class means
+        means_stats = all_angles['class_means']
+        means_data['mean_angles'].append(means_stats['mean_angle'])
+        means_data['deviations'].append(means_stats['angle_deviation'])
+        means_data['optimal'].append(means_stats['optimal_angle'])
+        means_data['all_angles'].append(means_stats['all_angles'])
+        
+        # Classifiers
+        classifier_stats = all_angles['classifiers']
+        classifiers_data['mean_angles'].append(classifier_stats['mean_angle'])
+        classifiers_data['deviations'].append(classifier_stats['angle_deviation'])
+        classifiers_data['optimal'].append(classifier_stats['optimal_angle'])
+        classifiers_data['all_angles'].append(classifier_stats['all_angles'])
+        
+        # Biases
+        bias_stats = all_angles['biases']
+        biases_data['mean_angles'].append(bias_stats['mean_angle'])
+        biases_data['deviations'].append(bias_stats['angle_deviation'])
+        biases_data['optimal'].append(bias_stats['optimal_angle'])  # Same simplex target
+        biases_data['all_angles'].append(bias_stats['all_angles'])
+        
+        # Mean-Classifier Alignment
+        align_stats = all_angles['mean_classifier_alignment']
+        alignment_data['mean_angles'].append(align_stats['mean_angle'])
+        alignment_data['deviations'].append(align_stats['angle_deviation'])
+        alignment_data['optimal'].append(0.0)  # Perfect alignment = 0°
+        alignment_data['all_angles'].append(align_stats['all_angles'])
+    
+    # Create figure with 2x2 subplots
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    
+    # Colors for each component
+    colors = {
+        'means': '#2E86AB',
+        'classifiers': '#A23B72', 
+        'biases': '#F18F01',
+        'alignment': '#C73E1D'
+    }
+    
+    # Plot 1: Class Means Convergence
+    ax1 = axes[0, 0]
+    ax1.plot(epochs, means_data['mean_angles'], 'o-', linewidth=3, markersize=8,
+             color=colors['means'], label='Class Means', zorder=3)
+    
+    if means_data['optimal']:
+        target = means_data['optimal'][0]
+        ax1.axhline(y=target, color='red', linestyle='--', linewidth=2.5,
+                   alpha=0.8, label=f'Simplex Target: {target:.1f}°', zorder=2)
+    
+    ax1.set_xlabel('Training Step', fontweight='bold')
+    ax1.set_ylabel('Angle (degrees)', fontweight='bold')
+    ax1.set_title('Class Means Pairwise Angles\n(computed in R^p)', fontweight='bold')
+    ax1.grid(True, alpha=0.3)
+    ax1.legend()
+    
+    # Plot 2: Classifiers Convergence  
+    ax2 = axes[0, 1]
+    ax2.plot(epochs, classifiers_data['mean_angles'], 'o-', linewidth=3, markersize=8,
+             color=colors['classifiers'], label='Classifiers', zorder=3)
+    
+    if classifiers_data['optimal']:
+        target = classifiers_data['optimal'][0]
+        ax2.axhline(y=target, color='red', linestyle='--', linewidth=2.5,
+                   alpha=0.8, label=f'Simplex Target: {target:.1f}°', zorder=2)
+    
+    ax2.set_xlabel('Training Step', fontweight='bold')
+    ax2.set_ylabel('Angle (degrees)', fontweight='bold')
+    ax2.set_title('Classifiers Pairwise Angles\n(computed in R^p)', fontweight='bold')
+    ax2.grid(True, alpha=0.3)
+    ax2.legend()
+    
+    # Plot 3: Biases Convergence
+    ax3 = axes[1, 0]
+    ax3.plot(epochs, biases_data['mean_angles'], 'o-', linewidth=3, markersize=8,
+             color=colors['biases'], label='Biases', zorder=3)
+    
+    # Biases often anti-align (180° apart) but may follow simplex too
+    if biases_data['optimal']:
+        target = biases_data['optimal'][0] 
+        ax3.axhline(y=target, color='red', linestyle='--', linewidth=2.5,
+                   alpha=0.8, label=f'Simplex Target: {target:.1f}°', zorder=2)
+    
+    # Also show anti-alignment possibility
+    ax3.axhline(y=180.0, color='orange', linestyle=':', linewidth=2,
+               alpha=0.8, label='Anti-align: 180°', zorder=1)
+    
+    ax3.set_xlabel('Training Step', fontweight='bold')
+    ax3.set_ylabel('Angle (degrees)', fontweight='bold')
+    ax3.set_title('Biases Pairwise Angles\n(computed in R^p)', fontweight='bold')
+    ax3.grid(True, alpha=0.3)
+    ax3.legend()
+    
+    # Plot 4: Mean-Classifier Alignment 
+    ax4 = axes[1, 1]
+    ax4.plot(epochs, alignment_data['mean_angles'], 'o-', linewidth=3, markersize=8,
+             color=colors['alignment'], label='Mean-Classifier Alignment', zorder=3)
+    
+    # Perfect alignment = 0°
+    ax4.axhline(y=0.0, color='red', linestyle='--', linewidth=2.5,
+               alpha=0.8, label='Perfect Alignment: 0°', zorder=2)
+    
+    ax4.set_xlabel('Training Step', fontweight='bold')
+    ax4.set_ylabel('Alignment Angle (degrees)', fontweight='bold') 
+    ax4.set_title('Class Mean ↔ Classifier Alignment\n(computed in R^p)', fontweight='bold')
+    ax4.grid(True, alpha=0.3)
+    ax4.legend()
+    
+    plt.suptitle(f'Complete Neural Collapse Angle Evolution (C={nc_analyzer.num_classes} classes)', 
+                 fontsize=16, fontweight='bold', y=0.98)
+    plt.tight_layout()
+    
+    # Save the plot
+    save_path = output_dir / 'complete_angle_convergence_evolution.png'
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"✅ Saved complete angle convergence plot to {save_path}")
+    plt.show()
+    
+    # Print comprehensive summary 
+    print("\n" + "="*80)
+    print("COMPLETE ANGLE CONVERGENCE ANALYSIS SUMMARY")
+    print("="*80)
+    print(f"Number of classes: {nc_analyzer.num_classes}")
+    if means_data['optimal']:
+        simplex_target = means_data['optimal'][0]
+        print(f"Theoretical simplex angle: {simplex_target:.2f}°")
+        print(f"Expected for C={nc_analyzer.num_classes}: {'120° (equilateral)' if nc_analyzer.num_classes == 3 else '~109.5° (tetrahedral)' if nc_analyzer.num_classes == 4 else f'{simplex_target:.1f}° (simplex)'}")
+        
+    print("\nFINAL CONVERGENCE RESULTS:")
+    print(f"  Class Means:     {means_data['mean_angles'][-1]:.2f}° (target: {means_data['optimal'][0]:.1f}°, error: {abs(means_data['mean_angles'][-1] - means_data['optimal'][0]):.2f}°)")
+    print(f"  Classifiers:     {classifiers_data['mean_angles'][-1]:.2f}° (target: {classifiers_data['optimal'][0]:.1f}°, error: {abs(classifiers_data['mean_angles'][-1] - classifiers_data['optimal'][0]):.2f}°)")  
+    print(f"  Biases:          {biases_data['mean_angles'][-1]:.2f}° (varies: simplex={biases_data['optimal'][0]:.1f}° or anti-align=180°)")
+    print(f"  Alignment:       {alignment_data['mean_angles'][-1]:.2f}° (target: 0°, error: {alignment_data['mean_angles'][-1]:.2f}°)")
+    print("="*80)
+
+
+
 
 
 def create_figure1_style_visualization(

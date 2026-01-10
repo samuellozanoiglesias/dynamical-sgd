@@ -10,7 +10,7 @@ data:
   noise_std: 0.2
   test_ratio: 0.25
   random_seed: 42
-  randomize_offsets: true  # If true, generates random angular offsets (breaks 120° symmetry)
+  randomize_offsets: false  # If true, generates random angular offsets (breaks 120° symmetry)
   angular_offsets: [0, 90, 180]     # Custom angular offsets in degrees [0, 120, 240] or null for default
 
 # Model architecture
@@ -21,7 +21,7 @@ model:
 
 # Training configuration
 training:
-  total_steps: 5000  # Long training to observe terminal phase
+  total_steps: 12000  # Long training to observe terminal phase
   batch_size: 200
   validation_interval: 100
 
@@ -42,7 +42,7 @@ analysis:
   track_weight_diff: false
   weight_diff_step_interval: 100
   track_neural_collapse: true  # ENABLE Neural Collapse tracking
-  nc_snapshot_interval: 2500   # Capture snapshot every 2500 steps
+  nc_snapshot_interval: 100   # Capture snapshot every 100 steps
 
 # Visualization configuration
 visualization:
