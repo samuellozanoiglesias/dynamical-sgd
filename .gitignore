@@ -170,11 +170,8 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 
-old/brigit*
 input*
 output*
-brigit*
-cuenca*
 *.out
 *.log
 logs*
