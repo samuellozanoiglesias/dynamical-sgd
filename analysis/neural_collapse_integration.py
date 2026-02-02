@@ -35,6 +35,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from typing import List, Optional, Tuple, Any
 from tqdm import tqdm
+import logging
 
 from analysis.neural_collapse import NeuralCollapseAnalyzer, NeuralCollapseSnapshot
 
@@ -326,10 +327,90 @@ def create_figure1_style_visualization(
     for idx, snapshot in enumerate(snapshots):
         ax = fig.add_subplot(nrows, ncols, idx + 1, projection='3d')
         
-        # Simplified visualization for subplot
-        # ... (implementation similar to visualize_neural_collapse but for subplot)
+        # Create simplified 3D visualization for subplot
+        # Filter data for selected classes (max 3 for clarity)
+        selected_classes = list(range(min(3, snapshot.num_classes)))
+        selected_classes_array = jnp.array(selected_classes)
         
+        # Filter data
+        mask = jnp.isin(snapshot.labels, selected_classes_array)
+        filtered_features = snapshot.features[mask]
+        filtered_labels = snapshot.labels[mask]
+        filtered_means = snapshot.class_means[selected_classes_array]
+        filtered_classifiers = snapshot.classifiers[selected_classes_array]
+        
+        # Sample features for visualization (fewer for subplot)
+        samples_per_class = 15
+        sampled_features = []
+        sampled_labels = []
+        for i, c in enumerate(selected_classes):
+            class_mask = filtered_labels == c
+            class_features = filtered_features[class_mask]
+            n_samples = min(samples_per_class, len(class_features))
+            if n_samples > 0:
+                indices = np.random.choice(len(class_features), n_samples, replace=False)
+                sampled_features.append(class_features[indices])
+                sampled_labels.append(np.full(n_samples, i))
+        
+        if sampled_features:
+            sampled_features = jnp.concatenate(sampled_features, axis=0)
+            sampled_labels = jnp.concatenate(sampled_labels, axis=0)
+        
+        # Project to 3D with normalization
+        if len(sampled_features) > 0:
+            proj_features, proj_means, proj_classifiers, etf_3d, basis = nc_analyzer.project_to_subspace(
+                sampled_features, filtered_means, filtered_classifiers, target_dim=3, normalize=True
+            )
+        else:
+            _, proj_means, proj_classifiers, etf_3d, basis = nc_analyzer.project_to_subspace(
+                filtered_features[:1] if len(filtered_features) > 0 else jnp.zeros((1, snapshot.feature_dim)),
+                filtered_means, filtered_classifiers, target_dim=3, normalize=True
+            )
+            proj_features = jnp.array([]).reshape(0, 3)
+        
+        # Colors for visualization
+        colors = ['#2E86AB', '#A23B72', '#F18F01']
+        
+        # Plot ETF (green spheres)
+        for i, c in enumerate(selected_classes):
+            ax.scatter([etf_3d[i, 0]], [etf_3d[i, 1]], [etf_3d[i, 2]],
+                      c='green', s=100, alpha=0.7, marker='o')
+        
+        # Plot class means (blue spheres with sticks)
+        for i, c in enumerate(selected_classes):
+            ax.scatter([proj_means[i, 0]], [proj_means[i, 1]], [proj_means[i, 2]],
+                      c=colors[i], s=80, alpha=0.8, marker='o')
+            ax.plot([0, proj_means[i, 0]], [0, proj_means[i, 1]], [0, proj_means[i, 2]],
+                   c=colors[i], linewidth=2, alpha=0.7)
+        
+        # Plot classifiers (red triangles with sticks)
+        for i, c in enumerate(selected_classes):
+            ax.scatter([proj_classifiers[i, 0]], [proj_classifiers[i, 1]], [proj_classifiers[i, 2]],
+                      c='red', s=60, alpha=0.8, marker='^')
+            ax.plot([0, proj_classifiers[i, 0]], [0, proj_classifiers[i, 1]], [0, proj_classifiers[i, 2]],
+                   c='red', linewidth=2, alpha=0.7)
+        
+        # Plot individual features (small dots)
+        if len(proj_features) > 0:
+            for i, c in enumerate(selected_classes):
+                class_mask = sampled_labels == i
+                if jnp.sum(class_mask) > 0:
+                    ax.scatter(proj_features[class_mask, 0], proj_features[class_mask, 1], 
+                              proj_features[class_mask, 2], c=colors[i], s=8, alpha=0.4)
+        
+        # Set subplot properties
+        ax.set_xlim(-1.5, 1.5)
+        ax.set_ylim(-1.5, 1.5)
+        ax.set_zlim(-1.5, 1.5)
         ax.set_title(f'Step {snapshot.epoch}', fontsize=12, fontweight='bold')
+        
+        # Remove axis labels and ticks for cleaner subplot
+        ax.set_xlabel('')
+        ax.set_ylabel('')
+        ax.set_zlabel('')
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_zticks([])
     
     plt.suptitle('Neural Collapse Evolution During Training', 
                  fontsize=16, fontweight='bold', y=0.98)
@@ -339,6 +420,56 @@ def create_figure1_style_visualization(
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     print(f"Saved Figure 1 style visualization to {save_path}")
     plt.show()
+
+
+def train_with_neural_collapse(
+    classifier,
+    X_train: jnp.ndarray,
+    Y_train: jnp.ndarray,
+    X_test: Optional[jnp.ndarray] = None,
+    Y_test: Optional[jnp.ndarray] = None,
+    snapshot_epochs: List[int] = None,
+    output_dir: Path = Path('outputs/nc_analysis'),
+    **training_kwargs
+) -> NeuralCollapseAnalyzer:
+    """
+    Train classifier with Neural Collapse analysis integration.
+    
+    This is a simplified wrapper that creates an NC analyzer, but the actual
+    training loop with NC integration is in run_experiment.py for full functionality.
+    
+    Args:
+        classifier: SpiralClassifier instance
+        X_train: Training data
+        Y_train: Training labels  
+        X_test: Test data (optional)
+        Y_test: Test labels (optional)
+        snapshot_epochs: List of epochs to capture snapshots
+        output_dir: Output directory for results
+        **training_kwargs: Additional training arguments
+        
+    Returns:
+        NeuralCollapseAnalyzer with captured snapshots
+    """
+    # Create output directory
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Initialize NC analyzer
+    nc_analyzer = NeuralCollapseAnalyzer(
+        num_classes=classifier.num_classes,
+        feature_dim=classifier.nn_width
+    )
+    
+    if snapshot_epochs is None:
+        snapshot_epochs = [0, 1000, 5000, 10000, 25000, 50000, 75000]
+    
+    logging.info(f"Neural Collapse training wrapper initialized")
+    logging.info(f"Snapshot epochs: {snapshot_epochs}")
+    logging.info(f"For full training integration, use run_experiment.py with track_neural_collapse=true")
+    
+    # Note: For full functionality, users should use run_experiment.py
+    # This is a simplified interface that sets up the analyzer
+    return nc_analyzer
 
 
 def analyze_neural_collapse_from_checkpoint(

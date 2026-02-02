@@ -172,15 +172,13 @@ class NeuralCollapseAnalyzer:
         """
         Extract last-layer features (activations before final linear layer).
         
-        This needs to be implemented based on the specific model architecture.
-        For now, we provide a placeholder that should be overridden.
+        For SpiralClassifier architecture: Dense -> ReLU -> Dense
+        This extracts features after the first Dense+ReLU.
         """
-        # For JAX stax models, we need to reconstruct the forward pass
-        # up to the penultimate layer
-        # This is a placeholder - needs model-specific implementation
-        raise NotImplementedError(
-            "Feature extraction needs to be implemented for specific model architecture"
-        )
+        # Apply first layer: Dense + ReLU (same as extract_penultimate_features)
+        W1, b1 = params[0]
+        features = jnp.maximum(0, jnp.dot(X, W1) + b1)
+        return features
     
     def _compute_class_means(
         self,
@@ -223,15 +221,13 @@ class NeuralCollapseAnalyzer:
         # For JAX stax models, params is a list of (W, b) tuples
         # Last layer weights are params[-1][0], shape (p, C)
         # Last layer biases are params[-1][1], shape (C,)
-        # Antelast layer biases are params[-2][1], shape (p,)
         last_layer_weights = params[-1][0]
         last_layer_biases = params[-1][1]
-        antelast_layer_biases = params[-2][1]
         
         # Transpose weights to (C, p) for easier handling
         classifiers = last_layer_weights.T
         
-        return classifiers, last_layer_biases, antelast_layer_biases
+        return classifiers, last_layer_biases
     
     def compute_simplex_etf(self, num_classes: Optional[int] = None) -> jnp.ndarray:
         """
@@ -463,11 +459,13 @@ class NeuralCollapseAnalyzer:
         # 3. Bias angles (note: biases are 1D, so we need to embed them in feature space)
         # For neural collapse, biases tend to anti-align (opposite directions)
         # We'll treat each bias as a vector pointing in the direction of its classifier
-        bias_vectors = jnp.zeros_like(snapshot.classifiers)
+        bias_vectors = []
         for i in range(snapshot.num_classes):
             # Bias direction aligned with classifier direction but scaled by bias magnitude
             classifier_dir = snapshot.classifiers[i] / (jnp.linalg.norm(snapshot.classifiers[i]) + 1e-8)
-            bias_vectors = bias_vectors.at[i].set(classifier_dir * snapshot.biases[i])
+            bias_vector = classifier_dir * snapshot.biases[i]
+            bias_vectors.append(bias_vector)
+        bias_vectors = jnp.stack(bias_vectors)
         
         bias_angles = self.compute_pairwise_angles(bias_vectors, "bias")
         
@@ -681,11 +679,13 @@ class NeuralCollapseAnalyzer:
         # Biases are in the output space, project them as vectors
         # For visualization, we treat bias as a direction vector in the output space
         # and project it to the same subspace
-        bias_vectors = jnp.zeros((n_vis_classes, filtered_biases.shape[0] if len(filtered_biases.shape) > 1 else self.feature_dim))
+        bias_vectors = []
         for i in range(n_vis_classes):
             # Use negative classifier direction scaled by bias magnitude
             # This shows the anti-alignment property of biases in NC
-            bias_vectors = bias_vectors.at[i].set(-filtered_classifiers[i] * jnp.abs(filtered_biases[i]))
+            bias_vector = -filtered_classifiers[i] * jnp.abs(filtered_biases[i])
+            bias_vectors.append(bias_vector)
+        bias_vectors = jnp.stack(bias_vectors)
         
         proj_biases = bias_vectors @ basis
         # Normalize biases for angle visualization
@@ -954,10 +954,12 @@ class NeuralCollapseAnalyzer:
             proj_features = jnp.array([]).reshape(0, 2)
         
         # Project biases (same method as 3D)
-        bias_vectors = jnp.zeros((n_vis_classes, filtered_classifiers.shape[1]))
+        bias_vectors = []
         for i in range(n_vis_classes):
             # Bias as negative classifier direction scaled by magnitude
-            bias_vectors = bias_vectors.at[i].set(-filtered_classifiers[i] * jnp.abs(filtered_biases[i]))
+            bias_vector = -filtered_classifiers[i] * jnp.abs(filtered_biases[i])
+            bias_vectors.append(bias_vector)
+        bias_vectors = jnp.stack(bias_vectors)
         
         proj_biases = bias_vectors @ basis
         # Normalize biases

@@ -4,37 +4,37 @@
 
 # Data configuration
 data:
-  points_per_class: 1000
+  points_per_class: 100
   num_classes: 3
   revolutions: 4.0
   noise_std: 0.2
   test_ratio: 0.25
-  random_seed: 42
-  randomize_offsets: true  # If true, generates random angular offsets (breaks 120° symmetry)
+  random_seed: 0
+  randomize_offsets: false  # If true, generates random angular offsets (breaks 120° symmetry)
   angular_offsets: [0, 90, 180]     # Custom angular offsets in degrees [0, 120, 240] or null for default
 
 # Model architecture
 model:
-  nn_width: 100  # Hidden layer width (feature dimension for NC analysis)
+  nn_width: 50  # Hidden layer width (feature dimension for NC analysis)
   activation: "relu"
   use_bias: true
 
 # Training configuration
 training:
-  total_steps: 200000  # Long training to observe terminal phase
+  total_steps: 75000  # Long training to observe terminal phase
   batch_size: 200
   validation_interval: 100
 
 # Optimizer configuration
 optimizer:
   optimizer_type: "adam"
-  learning_rate: 0.001
+  learning_rate: 0.002
   l2_reg: 0.0
 
 # Dynamic class focus (bumping) configuration
 dynamics:
   enable_dynamics: true  # Overridden by run_nc_experiment.py (true/false)
-  period_length: 1000    # Period T for class focus cycling
+  period_length: 500    # Period T for class focus cycling
   w_max: 50           # Maximum class weight (amplitude)
 
 # Analysis configuration
@@ -42,7 +42,7 @@ analysis:
   track_weight_diff: false
   weight_diff_step_interval: 100
   track_neural_collapse: true  # ENABLE Neural Collapse tracking
-  nc_snapshot_interval: 2500   # Capture snapshot every 2500 steps
+  nc_snapshot_interval: 100   # Capture snapshot every 100 steps
 
 # Visualization configuration
 visualization:
