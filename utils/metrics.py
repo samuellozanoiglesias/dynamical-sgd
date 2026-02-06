@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Tuple, Optional
 import numpy as np
 
 
-@partial(jit, static_argnums=(0,))
+@partial(jit, static_argnums=(0, 4))  # Mark model_fn and l2_reg as static
 def cross_entropy_loss(
     model_fn: Any,
     params: Any,
@@ -362,9 +362,12 @@ class MetricsTracker:
         """
         current_metrics = {}
         
+        # Ensure l2_reg is a float, not a string
+        l2_reg_float = float(l2_reg) if l2_reg is not None else 0.0
+        
         # Training metrics
         current_metrics['train_loss'] = float(
-            cross_entropy_loss(model_fn, params, X_train, Y_train, l2_reg)
+            cross_entropy_loss(model_fn, params, X_train, Y_train, l2_reg_float)
         )
         current_metrics['train_accuracy'] = float(
             classification_accuracy(model_fn, params, X_train, Y_train)
@@ -373,7 +376,7 @@ class MetricsTracker:
         # Test metrics
         if X_test is not None and Y_test is not None:
             current_metrics['test_loss'] = float(
-                cross_entropy_loss(model_fn, params, X_test, Y_test, l2_reg)
+                cross_entropy_loss(model_fn, params, X_test, Y_test, l2_reg_float)
             )
             current_metrics['test_accuracy'] = float(
                 classification_accuracy(model_fn, params, X_test, Y_test)

@@ -160,6 +160,230 @@ def plot_decision_boundary(
     plt.show()
 
 
+def plot_training_curves_with_classes(
+    losses: List[float],
+    accuracies: List[float],
+    test_losses: Optional[List[float]] = None,
+    test_accuracies: Optional[List[float]] = None,
+    train_losses_per_class: Optional[List[List[float]]] = None,
+    train_accuracies_per_class: Optional[List[List[float]]] = None,
+    test_losses_per_class: Optional[List[List[float]]] = None,
+    test_accuracies_per_class: Optional[List[List[float]]] = None,
+    metric_steps: Optional[List[int]] = None,
+    period_length: Optional[int] = None,
+    title: str = "Training Curves",
+    figsize: Tuple[int, int] = (15, 20),
+    step_100_acc: Optional[int] = None,
+    tpt_threshold: float = 1.0,
+    num_classes: Optional[int] = None
+) -> None:
+    """
+    Plot training and validation curves with per-class breakdown in 4x2 layout.
+    
+    Args:
+        losses: Training losses
+        accuracies: Training accuracies
+        test_losses: Optional test losses
+        test_accuracies: Optional test accuracies
+        train_losses_per_class: Training losses per class [num_steps x num_classes]
+        train_accuracies_per_class: Training accuracies per class [num_steps x num_classes]
+        test_losses_per_class: Test losses per class [num_steps x num_classes]
+        test_accuracies_per_class: Test accuracies per class [num_steps x num_classes]
+        metric_steps: Actual step numbers corresponding to metrics (if None, uses indices)
+        period_length: If provided, add vertical lines at period boundaries
+        title: Plot title
+        figsize: Figure size
+        step_100_acc: If provided, add vertical line at step where TPT accuracy threshold was reached
+        tpt_threshold: TPT accuracy threshold value (default 1.0 for 100%)
+        num_classes: Number of classes
+    """
+    # Determine number of classes if not provided
+    if num_classes is None:
+        if train_losses_per_class is not None:
+            num_classes = len(train_losses_per_class)
+        elif train_accuracies_per_class is not None:
+            num_classes = len(train_accuracies_per_class)
+        else:
+            # Default fallback
+            num_classes = 3
+    
+    # Create subplot layout: (num_classes + 1) rows x 2 columns
+    # Row 0: Total metrics, Rows 1+: Per-class metrics
+    fig, axes = plt.subplots(num_classes + 1, 2, figsize=(15, 5 * (num_classes + 1)))
+    
+    # Expand metrics to fill all intermediate steps (step function)
+    if metric_steps is not None and len(metric_steps) > 0:
+        # Create expanded arrays where metrics are held constant between validation intervals
+        max_step = max(metric_steps)
+        expanded_steps = list(range(max_step + 1))
+        expanded_losses = []
+        expanded_accuracies = []
+        expanded_test_losses = []
+        expanded_test_accuracies = []
+        if num_classes is not None:
+            expanded_train_losses_per_class = [[] for _ in range(num_classes)]
+            expanded_train_accuracies_per_class = [[] for _ in range(num_classes)]
+            expanded_test_losses_per_class = [[] for _ in range(num_classes)]
+            expanded_test_accuracies_per_class = [[] for _ in range(num_classes)]
+        else:
+            expanded_train_losses_per_class = []
+            expanded_train_accuracies_per_class = []
+            expanded_test_losses_per_class = []
+            expanded_test_accuracies_per_class = []
+        
+        for step in expanded_steps:
+            # Find the most recent metric_step <= current step
+            idx = 0
+            for i, metric_step in enumerate(metric_steps):
+                if metric_step <= step:
+                    idx = i
+                else:
+                    break
+            
+            expanded_losses.append(losses[idx])
+            expanded_accuracies.append(accuracies[idx])
+            if test_losses is not None and idx < len(test_losses):
+                expanded_test_losses.append(test_losses[idx])
+            if test_accuracies is not None and idx < len(test_accuracies):
+                expanded_test_accuracies.append(test_accuracies[idx])
+            
+            # Expand per-class data
+            # train_losses_per_class is [num_classes][num_metric_steps]
+            if train_losses_per_class is not None and num_classes is not None:
+                for c in range(num_classes):
+                    if idx < len(train_losses_per_class[c]):
+                        expanded_train_losses_per_class[c].append(train_losses_per_class[c][idx])
+            if train_accuracies_per_class is not None and num_classes is not None:
+                for c in range(num_classes):
+                    if idx < len(train_accuracies_per_class[c]):
+                        expanded_train_accuracies_per_class[c].append(train_accuracies_per_class[c][idx])
+            if test_losses_per_class is not None and num_classes is not None:
+                for c in range(num_classes):
+                    if idx < len(test_losses_per_class[c]):
+                        expanded_test_losses_per_class[c].append(test_losses_per_class[c][idx])
+            if test_accuracies_per_class is not None and num_classes is not None:
+                for c in range(num_classes):
+                    if idx < len(test_accuracies_per_class[c]):
+                        expanded_test_accuracies_per_class[c].append(test_accuracies_per_class[c][idx])
+        
+        steps = expanded_steps
+        losses = expanded_losses
+        accuracies = expanded_accuracies
+        test_losses = expanded_test_losses if expanded_test_losses else None
+        test_accuracies = expanded_test_accuracies if expanded_test_accuracies else None
+        train_losses_per_class = expanded_train_losses_per_class if train_losses_per_class is not None else None
+        train_accuracies_per_class = expanded_train_accuracies_per_class if train_accuracies_per_class is not None else None
+        test_losses_per_class = expanded_test_losses_per_class if test_losses_per_class is not None else None
+        test_accuracies_per_class = expanded_test_accuracies_per_class if test_accuracies_per_class is not None else None
+    else:
+        # When metric_steps is None, use indices as steps
+        steps = list(range(len(losses)))
+        # Per-class metrics need to match the number of steps
+        # They should already be in the correct format [num_classes][num_steps]
+    
+    # Row 1: Total metrics
+    ax_loss = axes[0, 0]
+    ax_acc = axes[0, 1]
+    
+    # Plot total losses
+    ax_loss.plot(steps, losses, 'b-', label='Training Loss', alpha=0.8, linewidth=1.5)
+    if test_losses is not None:
+        ax_loss.plot(steps[:len(test_losses)], test_losses, 'r--', 
+                    label='Test Loss', alpha=0.8, linewidth=1.5)
+    
+    ax_loss.set_xlabel('Step')
+    ax_loss.set_ylabel('Loss')
+    ax_loss.set_title('Total Loss')
+    ax_loss.set_yscale('log')
+    
+    # Set y-axis limits for loss
+    all_losses = list(losses)
+    if test_losses is not None:
+        all_losses.extend(test_losses)
+    loss_min = max(min(all_losses), 1e-6)  # Avoid log(0)
+    loss_max = max(all_losses) * 1.1  # Add 10% padding
+    ax_loss.set_ylim(bottom=loss_min, top=loss_max)
+    
+    # Add horizontal dashed lines
+    loss_horizontal_lines = [1e-3, 1e-2, 1e-1, 1.0, 10.0]
+    for loss_val in loss_horizontal_lines:
+        if loss_min <= loss_val <= loss_max:
+            ax_loss.axhline(y=loss_val, color='gray', linestyle='--', alpha=0.2, linewidth=0.8)
+    
+    ax_loss.legend()
+    
+    # Plot total accuracies
+    ax_acc.plot(steps, accuracies, 'b-', label='Training Accuracy', alpha=0.8, linewidth=1.5)
+    if test_accuracies is not None:
+        ax_acc.plot(steps[:len(test_accuracies)], test_accuracies, 'r--', 
+                   label='Test Accuracy', alpha=0.8, linewidth=1.5)
+    
+    ax_acc.set_xlabel('Step')
+    ax_acc.set_ylabel('Accuracy')
+    ax_acc.set_title('Total Accuracy')
+    
+    # Add horizontal dashed lines for total accuracy
+    accuracy_horizontal_lines = [0.2, 0.4, 0.6, 0.8, 1.0]
+    for acc_val in accuracy_horizontal_lines:
+        ax_acc.axhline(y=acc_val, color='gray', linestyle='--', alpha=0.2, linewidth=0.8)
+    
+    ax_acc.legend()
+    
+    # Rows 1+: Per-class metrics
+    for class_idx in range(num_classes):
+        row_idx = class_idx + 1
+        ax_loss_class = axes[row_idx, 0]
+        ax_acc_class = axes[row_idx, 1]
+        
+        # Plot per-class losses
+        if train_losses_per_class is not None:
+            ax_loss_class.plot(steps, train_losses_per_class[class_idx], 'b-', 
+                              label=f'Training Loss Class {class_idx}', alpha=0.8, linewidth=1.5)
+        if test_losses_per_class is not None:
+            ax_loss_class.plot(steps, test_losses_per_class[class_idx], 'r--', 
+                              label=f'Test Loss Class {class_idx}', alpha=0.8, linewidth=1.5)
+        
+        ax_loss_class.set_xlabel('Step')
+        ax_loss_class.set_ylabel('Loss')
+        ax_loss_class.set_title(f'Class {class_idx} Loss')
+        ax_loss_class.set_yscale('log')
+        
+        # Plot per-class accuracies
+        if train_accuracies_per_class is not None:
+            ax_acc_class.plot(steps, train_accuracies_per_class[class_idx], 'b-', 
+                             label=f'Training Accuracy Class {class_idx}', alpha=0.8, linewidth=1.5)
+        if test_accuracies_per_class is not None:
+            ax_acc_class.plot(steps, test_accuracies_per_class[class_idx], 'r--', 
+                             label=f'Test Accuracy Class {class_idx}', alpha=0.8, linewidth=1.5)
+        
+        ax_acc_class.set_xlabel('Step')
+        ax_acc_class.set_ylabel('Accuracy')
+        ax_acc_class.set_title(f'Class {class_idx} Accuracy')
+        
+        # Add horizontal dashed lines for class accuracy
+        for acc_val in accuracy_horizontal_lines:
+            ax_acc_class.axhline(y=acc_val, color='gray', linestyle='--', alpha=0.2, linewidth=0.8)
+        
+        ax_loss_class.legend()
+        ax_acc_class.legend()
+    
+    # Add WIDE vertical BLACK line at TPT accuracy threshold step (Terminal Phase Training)
+    if step_100_acc is not None:
+        threshold_label = f'TPT Threshold ({tpt_threshold*100:.0f}% Train Acc)'
+        for i in range(num_classes + 1):
+            for j in range(2):
+                ax = axes[i, j]
+                # WIDE BLACK LINE - linewidth=4 to make it very visible
+                ax.axvline(x=step_100_acc, color='black', linestyle='-', alpha=0.9, linewidth=4, 
+                          label=threshold_label, zorder=10)
+                # Update legend to include the TPT marker
+                ax.legend(loc='best')
+    
+    plt.suptitle(title, fontsize=16)
+    plt.tight_layout()
+    # DO NOT CALL plt.show() - it prevents saving!
+
+
 def plot_training_curves(
     losses: List[float],
     accuracies: List[float],
@@ -168,7 +392,9 @@ def plot_training_curves(
     metric_steps: Optional[List[int]] = None,
     period_length: Optional[int] = None,
     title: str = "Training Curves",
-    figsize: Tuple[int, int] = (15, 5)
+    figsize: Tuple[int, int] = (15, 5),
+    step_100_acc: Optional[int] = None,
+    tpt_threshold: float = 1.0
 ) -> None:
     """
     Plot training and validation curves.
@@ -182,6 +408,8 @@ def plot_training_curves(
         period_length: If provided, add vertical lines at period boundaries
         title: Plot title
         figsize: Figure size
+        step_100_acc: If provided, add vertical line at step where TPT accuracy threshold was reached
+        tpt_threshold: TPT accuracy threshold value (default 1.0 for 100%)
     """
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
     
@@ -230,8 +458,24 @@ def plot_training_curves(
     ax1.set_ylabel('Loss')
     ax1.set_title('Loss Curves')
     ax1.set_yscale('log')
+    
+    # Set y-axis limits to include ALL values (min to max of actual data)
+    all_losses = list(losses)
+    if test_losses is not None:
+        all_losses.extend(test_losses)
+    loss_min = max(min(all_losses), 1e-6)  # Avoid log(0)
+    loss_max = max(all_losses) * 1.1  # Add 10% padding
+    # Set bottom limit a bit lower than minimum to make horizontal lines visible
+    loss_bottom = loss_min * 0.5  # 50% lower than minimum
+    ax1.set_ylim(bottom=loss_bottom, top=loss_max)
+    
+    # Add horizontal dashed lines at specific loss values (soft/subtle)
+    loss_horizontal_lines = [1e-3, 1e-2, 1e-1, 1.0, 10.0]
+    for loss_val in loss_horizontal_lines:
+        if loss_min <= loss_val <= loss_max:
+            ax1.axhline(y=loss_val, color='gray', linestyle='--', alpha=0.2, linewidth=0.8)
+    
     ax1.legend()
-    ax1.grid(True, alpha=0.3)
     
     # Plot accuracies
     ax2.plot(steps, accuracies, 'b-', label='Training Accuracy', alpha=0.8, linewidth=1.5)
@@ -243,19 +487,28 @@ def plot_training_curves(
     ax2.set_xlabel('Step')
     ax2.set_ylabel('Accuracy')
     ax2.set_title('Accuracy Curves')
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
     
-    # Add period markers if specified
-    if period_length is not None and metric_steps is not None:
-        max_step = max(metric_steps)
+    # Add horizontal dashed lines at specific accuracy values (soft/subtle)
+    accuracy_horizontal_lines = [0.2, 0.4, 0.6, 0.8, 1.0]
+    for acc_val in accuracy_horizontal_lines:
+        ax2.axhline(y=acc_val, color='gray', linestyle='--', alpha=0.2, linewidth=0.8)
+    
+    ax2.legend()
+    
+    # Add WIDE vertical BLACK line at TPT accuracy threshold step (Terminal Phase Training)
+    if step_100_acc is not None:
+        threshold_label = f'TPT Threshold ({tpt_threshold*100:.0f}% Train Acc)'
         for ax in [ax1, ax2]:
-            for i in range(1, max_step // period_length + 1):
-                ax.axvline(x=i * period_length, color='gray', linestyle=':', alpha=0.5)
+            # WIDE BLACK LINE - linewidth=4 to make it very visible
+            ax.axvline(x=step_100_acc, color='black', linestyle='-', alpha=0.9, linewidth=4, 
+                      label=threshold_label, zorder=10)
+        # Update legend to include the TPT marker
+        ax1.legend(loc='best')
+        ax2.legend(loc='best')
     
     plt.suptitle(title, fontsize=16)
     plt.tight_layout()
-    plt.show()
+    # DO NOT CALL plt.show() - it prevents saving!
 
 
 def plot_class_focus_dynamics(

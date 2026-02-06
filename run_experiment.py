@@ -14,6 +14,7 @@ Usage:
 import argparse
 import sys
 from pathlib import Path
+from typing import Optional, List, Dict
 import logging
 
 # Add project root to path
@@ -24,15 +25,14 @@ from src.models.spiral_classifier import SpiralClassifier
 from utils.data_utils import generate_spiral_data, create_train_test_split, DataLoader
 from utils.visualization import (
     plot_spiral_dataset, plot_decision_boundary, plot_training_curves,
-    plot_class_focus_dynamics, setup_matplotlib_style
+    plot_training_curves_with_classes, plot_class_focus_dynamics, setup_matplotlib_style
 )
 from utils.metrics import MetricsTracker
 from config.experiment_config import ExperimentConfig, load_config_with_overrides
-from analysis.neural_collapse import (
-    NeuralCollapseAnalyzer, NeuralCollapseSnapshot, create_video_from_images
-)
+from analysis.neural_collapse import NeuralCollapseAnalyzer
+from analysis.nc_visualization import create_nc_figure1_evolution
 from analysis.neural_collapse_integration import (
-    extract_penultimate_features, plot_nc_metrics_evolution, plot_angle_convergence_evolution
+    plot_nc_metrics_evolution, plot_angle_convergence_evolution
 )
 import jax
 import jax.numpy as jnp
@@ -129,7 +129,8 @@ def generate_and_prepare_data(config: ExperimentConfig):
         noise_std=config.data.noise_std,
         random_seed=seed,
         angular_offsets=getattr(config.data, 'angular_offsets', None),
-        randomize_offsets=getattr(config.data, 'randomize_offsets', False)
+        randomize_offsets=getattr(config.data, 'randomize_offsets', False),
+        min_radius=getattr(config.data, 'min_radius', 0.05)
     )
     
     # Generate test data with different seed
@@ -141,7 +142,8 @@ def generate_and_prepare_data(config: ExperimentConfig):
         noise_std=config.data.noise_std,
         random_seed=test_seed,
         angular_offsets=getattr(config.data, 'angular_offsets', None),
-        randomize_offsets=getattr(config.data, 'randomize_offsets', False)
+        randomize_offsets=getattr(config.data, 'randomize_offsets', False),
+        min_radius=getattr(config.data, 'min_radius', 0.05)
     )
     
     logging.info(f"Generated training set: {X_train.shape[0]} samples")
@@ -166,16 +168,26 @@ def create_and_train_model(
         points_per_class=config.data.points_per_class,
         num_classes=config.data.num_classes,
         nn_width=config.model.nn_width,
+        num_hidden_layers=getattr(config.model, 'num_hidden_layers', 1),
         learning_rate=config.optimizer.learning_rate,
         optimizer_type=config.optimizer.optimizer_type,
         period_length=config.dynamics.period_length,
         l2_reg=config.optimizer.l2_reg,
-        random_seed=config.random_seed,
+        random_seed=config.training.random_seed if config.training.random_seed is not None else config.random_seed,
         label=config.output.experiment_name,
         track_weight_diff=config.analysis.track_weight_diff,
         weight_diff_step_interval=config.analysis.weight_diff_step_interval,
         real_time_visualization=config.visualization.real_time_visualization,
-        vis_step_interval=config.visualization.vis_step_interval
+        vis_step_interval=config.visualization.vis_step_interval,
+        use_batchnorm=getattr(config.model, 'use_batchnorm', True),
+        use_bias=getattr(config.model, 'use_bias', True),
+        # Optimizer parameters
+        momentum=getattr(config.optimizer, 'momentum', 0.9),
+        beta1=getattr(config.optimizer, 'beta1', 0.9),
+        beta2=getattr(config.optimizer, 'beta2', 0.999),
+        eps=getattr(config.optimizer, 'eps', 1e-8),
+        # Initialization parameters
+        weight_init_scale=getattr(config.model, 'weight_init_scale', 1.0)
     )
     
     # Setup metrics tracking
@@ -233,14 +245,14 @@ def create_and_train_model(
         logging.info(f"Periods per class: {num_periods_per_class:.1f}")
         
         # Warning for short period length
-        if config.dynamics.period_length < 500:
+        if config.dynamics.period_length < 100:
             logging.warning("⚠️  VERY SHORT PERIOD LENGTH!")
             logging.warning(f"   Period length: {config.dynamics.period_length} steps")
             logging.warning(f"   Each bump lasts only {config.dynamics.period_length} steps")
             logging.warning(f"   Ramp up/down happens in {config.dynamics.period_length//2} steps each")
             logging.warning(f"   This may be too fast for observable bump dynamics")
             logging.warning(f"   Recommended: period_length >= 1000 for clear effects")
-        elif config.dynamics.period_length < 1000:
+        elif config.dynamics.period_length < 500:
             logging.warning("⚠️  SHORT PERIOD LENGTH")
             logging.warning(f"   Period length: {config.dynamics.period_length} steps")
             logging.warning(f"   Consider period_length >= 1000 for clearer bump dynamics")
@@ -272,7 +284,10 @@ def create_and_train_model(
         logging.info("Neural Collapse tracking enabled")
         nc_analyzer = NeuralCollapseAnalyzer(
             num_classes=config.data.num_classes,
-            feature_dim=config.model.nn_width
+            feature_dim=config.model.nn_width,
+            num_hidden_layers=getattr(config.model, 'num_hidden_layers', 1),
+            use_batchnorm=getattr(config.model, 'use_batchnorm', True),
+            use_bias=getattr(config.model, 'use_bias', True)
         )
         # Define snapshot epochs
         snapshot_interval = config.analysis.nc_snapshot_interval
@@ -298,6 +313,10 @@ def create_and_train_model(
     from utils.data_utils import compute_class_indices
     class_indices = compute_class_indices(Y_train)
     
+    # Create DataLoader once (not inside the training loop!)
+    # This prevents recreating it with the same seed on every iteration
+    data_loader = DataLoader(X_train, Y_train, config.training.batch_size, random_seed=seed)
+    
     # Training metrics storage
     train_losses = []
     train_accuracies = []
@@ -305,9 +324,19 @@ def create_and_train_model(
     test_accuracies = []
     metric_steps = []  # Track actual step numbers for metrics
     
+    # Track when 100% training accuracy is reached
+    step_100_acc = None  # Step at which train_acc reaches 100%
+    terminal_full_training_reached = False
+    
     with tqdm(total=config.training.total_steps, desc="Training") as pbar:
         for t in range(config.training.total_steps):
-            if config.dynamics.enable_dynamics:
+            # Determine if we should apply bumping dynamics
+            apply_bumping = config.dynamics.enable_dynamics
+            if terminal_full_training_reached and not config.dynamics.bumps_TPT:
+                # Stop bumping after 100% accuracy if bumps_TPT is False
+                apply_bumping = False
+            
+            if apply_bumping:
                 # Dynamic class focus
                 class_focus = int((t // config.dynamics.period_length) % config.data.num_classes)
                 current_weights = classifier.compute_class_weights(
@@ -324,8 +353,7 @@ def create_and_train_model(
                     X_train, Y_train, class_counts, key, class_indices
                 )
             else:
-                # Balanced sampling
-                data_loader = DataLoader(X_train, Y_train, config.training.batch_size)
+                # Balanced sampling (using pre-created data_loader)
                 X_batch, Y_batch = data_loader.get_balanced_batch()
             
             # Update parameters
@@ -343,56 +371,48 @@ def create_and_train_model(
                 test_accuracies.append(current_metrics['test_accuracy'])
                 metric_steps.append(t)  # Record the actual step number
                 
+                # Check if TPT accuracy threshold reached for the first time
+                tpt_threshold = getattr(config.dynamics, 'tpt_accuracy_threshold', 1.0)
+                if not terminal_full_training_reached and current_metrics['train_accuracy'] >= tpt_threshold:
+                    step_100_acc = t
+                    terminal_full_training_reached = True
+                    logging.info(f"🎯 Terminal Phase Training ({tpt_threshold*100:.1f}% accuracy) reached at step {t}")
+                    if config.dynamics.enable_dynamics:
+                        if config.dynamics.bumps_TPT:
+                            logging.info(f"   Continuing bumps after {tpt_threshold*100:.1f}% accuracy (bumps_TPT=true)")
+                        else:
+                            logging.info(f"   Stopping bumps after {tpt_threshold*100:.1f}% accuracy (bumps_TPT=false)")
+                
                 # Update progress bar with latest metrics
                 pbar.set_postfix({
-                    'Train Loss': f"{current_metrics['train_loss']:.4f}",
+                    'Train Loss': f"{current_metrics['train_loss']:.8f}",
                     'Train Acc': f"{current_metrics['train_accuracy']:.3f}",
                     'Test Acc': f"{current_metrics['test_accuracy']:.3f}"
                 })
             
-            # Capture Neural Collapse snapshot if enabled
+            # Log simple training progress
+            if t % config.training.validation_interval == 0 or t == config.training.total_steps - 1:
+                logging.info(f"Step {t}: Train Loss={current_metrics['train_loss']:.6f}, "
+                           f"Train Acc={current_metrics['train_accuracy']:.6f}, "
+                           f"Test Loss={current_metrics['test_loss']:.6f}, "
+                           f"Test Acc={current_metrics['test_accuracy']:.6f}")
+            
+            # Capture Neural Collapse snapshot if enabled (but don't log detailed metrics)
             if nc_analyzer is not None and t in snapshot_epochs:
-                # Extract features from penultimate layer
-                features = extract_penultimate_features(params, X_train)
-                labels = jnp.argmax(Y_train, axis=1)
-                
-                # Compute class means
-                class_means = []
-                for c in range(config.data.num_classes):
-                    mask = labels == c
-                    if jnp.sum(mask) > 0:
-                        class_mean = jnp.mean(features[mask], axis=0)
-                    else:
-                        class_mean = jnp.zeros(config.model.nn_width)
-                    class_means.append(class_mean)
-                class_means = jnp.stack(class_means)
-                
-                # Extract classifiers (W) and biases (b) from last layer
-                # params[-1] is (W, b) where W is (hidden_dim, num_classes)
-                classifiers = params[-1][0].T  # (num_classes, hidden_dim)
-                biases = params[-1][1]  # (num_classes,)
-                
-                # Create snapshot
-                snapshot = NeuralCollapseSnapshot(
+                # Use the analyzer's method to extract features, compute metrics, and create snapshot
+                # CRITICAL: Must use FULL training dataset (X_train, Y_train), NOT batch (X_batch, Y_batch)!
+                # NC metrics require all samples from all classes to compute proper class means and scatter matrices
+                snapshot = nc_analyzer.extract_features_and_classifiers(
+                    model_fn=None,  # Not used
+                    params=params,
+                    X=X_train,  # ✅ FULL training dataset (NOT X_batch!)
+                    Y=Y_train,  # ✅ FULL training labels (NOT Y_batch!)
                     epoch=t,
-                    features=features,
-                    labels=labels,
-                    class_means=class_means,
-                    classifiers=classifiers,
-                    biases=biases,
-                    num_classes=config.data.num_classes,
-                    feature_dim=config.model.nn_width
+                    X_test=X_test,  # ✅ FULL test dataset for NC4 metric
+                    Y_test=Y_test   # ✅ FULL test labels for NC4 metric
                 )
-                nc_analyzer.snapshots.append(snapshot)
                 
-                # Compute and log metrics
-                nc_metrics = nc_analyzer.compute_nc_metrics(snapshot)
-                logging.info(
-                        f"Step {t} NC Metrics: "
-                        f"NC1={nc_metrics['nc1_within_class_variance']:.6f}, "
-                        f"NC2={nc_metrics['nc2_etf_alignment']:.4f}, "
-                        f"NC3={nc_metrics['nc3_self_duality']:.4f}"
-                    )
+                # Store NC metrics for later saving (don't log them)
             
             pbar.update(1)
     
@@ -403,10 +423,15 @@ def create_and_train_model(
     final_train_acc = float(classifier.accuracy(params, X_train, Y_train))
     final_test_acc = float(classifier.accuracy(params, X_test, Y_test))
     
-    logging.info(f"Final training accuracy: {final_train_acc:.4f}")
-    logging.info(f"Final test accuracy: {final_test_acc:.4f}")
+    logging.info(f"Final training accuracy: {final_train_acc:.8f}")
+    logging.info(f"Final test accuracy: {final_test_acc:.8f}")
     
-    return classifier, train_losses, train_accuracies, test_losses, test_accuracies, metric_steps, nc_analyzer
+    if step_100_acc is not None:
+        logging.info(f"Terminal Phase Training (100% accuracy) was reached at step: {step_100_acc}")
+    else:
+        logging.info("Terminal Full Training (100% accuracy) was NOT reached during training")
+    
+    return classifier, train_losses, train_accuracies, test_losses, test_accuracies, metric_steps, nc_analyzer, step_100_acc
 
 
 def create_visualizations(
@@ -421,7 +446,9 @@ def create_visualizations(
     test_losses: list,
     test_accuracies: list,
     metric_steps: list,
-    output_dir: Path
+    output_dir: Path,
+    step_100_acc: Optional[int] = None,
+    all_per_class_metrics: Optional[List[Dict]] = None
 ):
     """Create and save visualizations."""
     logging.info("Creating visualizations...")
@@ -448,15 +475,54 @@ def create_visualizations(
     
     # Plot training curves
     if config.visualization.save_training_curves:
-        plot_training_curves(
-            train_losses,
-            train_accuracies,
-            test_losses,
-            test_accuracies,
-            metric_steps=metric_steps,
-            period_length=config.dynamics.period_length if config.dynamics.enable_dynamics else None,
-            title="Training Progress"
-        )
+        tpt_threshold = getattr(config.dynamics, 'tpt_accuracy_threshold', 1.0)
+        
+        # Check if we have per-class data
+        if all_per_class_metrics is not None and len(all_per_class_metrics) > 0:
+            # Extract per-class arrays
+            num_classes = config.data.num_classes
+            train_losses_per_class = [[] for _ in range(num_classes)]
+            train_accuracies_per_class = [[] for _ in range(num_classes)]
+            test_losses_per_class = [[] for _ in range(num_classes)]
+            test_accuracies_per_class = [[] for _ in range(num_classes)]
+            
+            for per_class in all_per_class_metrics:
+                for c in range(num_classes):
+                    train_losses_per_class[c].append(per_class[f'Train_Loss_Class_{c}'])
+                    train_accuracies_per_class[c].append(per_class[f'Train_Acc_Class_{c}'])
+                    test_losses_per_class[c].append(per_class[f'Test_Loss_Class_{c}'])
+                    test_accuracies_per_class[c].append(per_class[f'Test_Acc_Class_{c}'])
+            
+            # Use the new 4x2 layout function
+            plot_training_curves_with_classes(
+                train_losses,
+                train_accuracies,
+                test_losses,
+                test_accuracies,
+                train_losses_per_class=train_losses_per_class,
+                train_accuracies_per_class=train_accuracies_per_class,
+                test_losses_per_class=test_losses_per_class,
+                test_accuracies_per_class=test_accuracies_per_class,
+                metric_steps=metric_steps,
+                period_length=config.dynamics.period_length if config.dynamics.enable_dynamics else None,
+                title="Training Progress with Per-Class Breakdown",
+                step_100_acc=step_100_acc,
+                tpt_threshold=tpt_threshold,
+                num_classes=num_classes
+            )
+        else:
+            # Fall back to original function
+            plot_training_curves(
+                train_losses,
+                train_accuracies,
+                test_losses,
+                test_accuracies,
+                metric_steps=metric_steps,
+                period_length=config.dynamics.period_length if config.dynamics.enable_dynamics else None,
+                title="Training Progress",
+                step_100_acc=step_100_acc,
+                tpt_threshold=tpt_threshold
+            )
         plt.savefig(output_dir / "training_curves.png", dpi=config.visualization.figure_dpi)
         plt.close()
     
@@ -475,6 +541,75 @@ def create_visualizations(
         plt.close()
 
 
+def save_nc_results(nc_metrics_history: list, output_dir: Path):
+    """Save Neural Collapse metrics to CSV file."""
+    if not nc_metrics_history:
+        return
+    
+    with open(output_dir / 'nc_results.csv', 'w') as f:
+        # Write CSV header with all NC metrics
+        header = ("Step,NC1,NC2_CV_means,NC2_CV_cls,NC2_Std_means,NC2_Std_cls,"
+                 "NC2_Mean_means,NC2_Mean_cls,NC2_Target,NC3,NC4")
+        f.write(header + "\n")
+        
+        # Write metrics data
+        for epoch, metrics in nc_metrics_history:
+            nc4_value = metrics.get('nc7_ncc_mismatch', 0.0)  # NC4 was called nc7_ncc_mismatch internally
+            line = (
+                f"{epoch},{metrics['nc1_variability']:.6f},"
+                f"{metrics['nc2_equinorm_cv_means']:.6f},{metrics['nc2_equinorm_cv_classifiers']:.6f},"
+                f"{metrics['nc2_equiangular_std_means']:.6f},{metrics['nc2_equiangular_std_classifiers']:.6f},"
+                f"{metrics['nc2_equiangular_mean_means']:.6f},{metrics['nc2_equiangular_mean_classifiers']:.6f},"
+                f"{metrics['nc2_equiangular_target']:.6f},{metrics['nc3_self_duality']:.6f},{nc4_value:.6f}"
+            )
+            f.write(line + "\n")
+    
+    logging.info(f"NC results saved to: {output_dir / 'nc_results.csv'}")
+
+def compute_per_class_metrics(classifier, params, X_train, Y_train, X_test, Y_test, num_classes):
+    """Compute per-class accuracy and loss metrics."""
+    from jax import nn
+    
+    # Convert one-hot to class indices
+    train_labels = jnp.argmax(Y_train, axis=1)
+    test_labels = jnp.argmax(Y_test, axis=1)
+    
+    per_class_metrics = {}
+    
+    for c in range(num_classes):
+        # Training metrics for class c
+        train_mask = train_labels == c
+        if jnp.sum(train_mask) > 0:
+            X_train_c = X_train[train_mask]
+            Y_train_c = Y_train[train_mask]
+            
+            train_logits_c = classifier.model[1](params, X_train_c)
+            train_loss_c = float(-jnp.mean(jnp.sum(Y_train_c * nn.log_softmax(train_logits_c), axis=1)))
+            train_acc_c = float(jnp.mean(jnp.argmax(train_logits_c, axis=1) == jnp.argmax(Y_train_c, axis=1)))
+        else:
+            train_loss_c = 0.0
+            train_acc_c = 0.0
+        
+        # Test metrics for class c
+        test_mask = test_labels == c
+        if jnp.sum(test_mask) > 0:
+            X_test_c = X_test[test_mask]
+            Y_test_c = Y_test[test_mask]
+            
+            test_logits_c = classifier.model[1](params, X_test_c)
+            test_loss_c = float(-jnp.mean(jnp.sum(Y_test_c * nn.log_softmax(test_logits_c), axis=1)))
+            test_acc_c = float(jnp.mean(jnp.argmax(test_logits_c, axis=1) == jnp.argmax(Y_test_c, axis=1)))
+        else:
+            test_loss_c = 0.0
+            test_acc_c = 0.0
+        
+        per_class_metrics[f'Train_Loss_Class_{c}'] = train_loss_c
+        per_class_metrics[f'Train_Acc_Class_{c}'] = train_acc_c
+        per_class_metrics[f'Test_Loss_Class_{c}'] = test_loss_c
+        per_class_metrics[f'Test_Acc_Class_{c}'] = test_acc_c
+    
+    return per_class_metrics
+
 def save_results(
     config: ExperimentConfig,
     classifier: SpiralClassifier,
@@ -483,16 +618,35 @@ def save_results(
     test_losses: list,
     test_accuracies: list,
     metric_steps: list,
-    output_dir: Path
+    output_dir: Path,
+    X_train: jnp.ndarray,
+    Y_train: jnp.ndarray,
+    X_test: jnp.ndarray,
+    Y_test: jnp.ndarray,
+    step_100_acc: Optional[int] = None,
+    all_per_class_metrics: Optional[List[Dict]] = None
 ):
     """Save experiment results to files."""
     logging.info("Saving results...")
     
     if config.output.save_metrics:
-        # Save results as CSV file
-        with open(output_dir / 'results.csv', 'w') as f:
+        # Use pre-computed per-class metrics if available, otherwise compute them
+        if all_per_class_metrics is None:
+            all_per_class_metrics = []
+            for i in range(len(metric_steps)):
+                # Get params at this step (use final params as approximation)
+                step_per_class = compute_per_class_metrics(
+                    classifier, classifier.last_params, X_train, Y_train, X_test, Y_test, config.data.num_classes
+                )
+                all_per_class_metrics.append(step_per_class)
+        
+        # Save training_results.csv file with per-class metrics
+        with open(output_dir / 'training_results.csv', 'w') as f:
             # Write CSV header
-            f.write("Step,Train_Acc,Test_Acc,Train_Loss,Test_Loss\n")
+            header = "Step,Train_Acc,Test_Acc,Train_Loss,Test_Loss"
+            for c in range(config.data.num_classes):
+                header += f",Train_Loss_Class_{c},Train_Acc_Class_{c},Test_Loss_Class_{c},Test_Acc_Class_{c}"
+            f.write(header + "\n")
             
             # Write metrics at evaluation points
             for i in range(len(train_accuracies)):
@@ -501,9 +655,25 @@ def save_results(
                 test_loss = test_losses[i] if i < len(test_losses) else 0.0
                 train_acc = train_accuracies[i]
                 test_acc = test_accuracies[i]
-                f.write(f"{step},{train_acc:.6f},{test_acc:.6f},{train_loss:.6f},{test_loss:.6f}\n")
+                
+                line = f"{step},{train_acc:.6f},{test_acc:.6f},{train_loss:.6f},{test_loss:.6f}"
+                
+                # Add per-class metrics
+                if i < len(all_per_class_metrics):
+                    per_class = all_per_class_metrics[i]
+                    for c in range(config.data.num_classes):
+                        line += f",{per_class[f'Train_Loss_Class_{c}']:.6f}"
+                        line += f",{per_class[f'Train_Acc_Class_{c}']:.6f}"
+                        line += f",{per_class[f'Test_Loss_Class_{c}']:.6f}"
+                        line += f",{per_class[f'Test_Acc_Class_{c}']:.6f}"
+                else:
+                    # Fill with zeros if no per-class data
+                    for c in range(config.data.num_classes):
+                        line += ",0.0,0.0,0.0,0.0"
+                
+                f.write(line + "\n")
         
-        logging.info(f"Results saved to: {output_dir / 'results.csv'}")
+        logging.info(f"Training results saved to: {output_dir / 'training_results.csv'}")
     
     if config.output.save_final_model and classifier.last_params is not None:
         with open(output_dir / 'final_model_params.pkl', 'wb') as f:
@@ -516,7 +686,8 @@ def save_results(
         'final_test_accuracy': test_accuracies[-1] if test_accuracies else 0,
         'total_parameters': sum(
             p.size for p in jax.tree_util.tree_leaves(classifier.last_params)
-        ) if classifier.last_params else 0
+        ) if classifier.last_params else 0,
+        'step_100_acc': step_100_acc
     }
     
     import json
@@ -605,26 +776,38 @@ def main():
         logging.info(f"Saved test dataset plot: {output_dir / 'test_dataset.png'}")
         
         # Train model
-        classifier, train_losses, train_accuracies, test_losses, test_accuracies, metric_steps, nc_analyzer = create_and_train_model(
+        classifier, train_losses, train_accuracies, test_losses, test_accuracies, metric_steps, nc_analyzer, step_100_acc = create_and_train_model(
             config, X_train, Y_train, X_test, Y_test, output_dir
         )
+        
+        # Compute per-class metrics for visualization and saving
+        all_per_class_metrics = []
+        if config.output.save_metrics:
+            for i in range(len(metric_steps)):
+                # Get params at this step (use final params as approximation)
+                step_per_class = compute_per_class_metrics(
+                    classifier, classifier.last_params, X_train, Y_train, X_test, Y_test, config.data.num_classes
+                )
+                all_per_class_metrics.append(step_per_class)
         
         # Create visualizations
         create_visualizations(
             config, classifier, X_train, Y_train, X_test, Y_test,
-            train_losses, train_accuracies, test_losses, test_accuracies, metric_steps, output_dir
+            train_losses, train_accuracies, test_losses, test_accuracies, metric_steps, output_dir,
+            step_100_acc=step_100_acc, all_per_class_metrics=all_per_class_metrics
         )
         
         # Save results
         save_results(
             config, classifier, train_losses, train_accuracies,
-            test_losses, test_accuracies, metric_steps, output_dir
+            test_losses, test_accuracies, metric_steps, output_dir,
+            X_train, Y_train, X_test, Y_test, step_100_acc, all_per_class_metrics
         )
         
         # Save Neural Collapse analysis if enabled
         if nc_analyzer is not None and len(nc_analyzer.snapshots) > 0:
             logging.info("Saving Neural Collapse analysis...")
-            nc_analyzer.save_snapshots(output_dir / 'nc_snapshots.pkl')
+            # nc_analyzer.save_snapshots(output_dir / 'nc_snapshots.pkl')  # Disabled - too large
             
             # Compute metrics history
             nc_metrics_history = [
@@ -632,78 +815,35 @@ def main():
                 for snap in nc_analyzer.snapshots
             ]
             
-            # Plot NC metrics evolution
-            plot_nc_metrics_evolution(nc_metrics_history, output_dir)
+            # Save NC metrics to CSV
+            save_nc_results(nc_metrics_history, output_dir)
+            
+            # Plot NC metrics evolution with TPT threshold
+            tpt_threshold = getattr(config.dynamics, 'tpt_accuracy_threshold', 1.0)
+            plot_nc_metrics_evolution(nc_metrics_history, output_dir, step_100_acc, tpt_threshold)
             
             # Plot angle convergence evolution (true geometric angles in R^p)
             plot_angle_convergence_evolution(nc_analyzer, output_dir)
             
-            # Visualize selected snapshots with FIXED axes for proper comparison
+            # NOTE: 3D/2D visualizations disabled in simplified NC version
+            # (visualize_neural_collapse methods are stubs)
+            
+            # Create NC Figure 1 visualization (Papyan et al. style)
             if config.visualization.save_nc_visualizations:
-                # Compute consistent axis limit based on ETF scale
-                # ETF represents the theoretical target configuration
-                etf = nc_analyzer.compute_simplex_etf(num_classes=config.data.num_classes)
-                etf_scale = float(jnp.max(jnp.abs(etf))) * 1.5  # 50% margin for clarity
+                logging.info("Creating NC Figure 1 visualizations (Papyan et al., 2020 style)...")
+                vis_interval = getattr(config.visualization, 'vis_step_interval', 1000)
+                selected_epochs = [snap.epoch for snap in nc_analyzer.snapshots 
+                                 if snap.epoch % vis_interval == 0 or snap.epoch == nc_analyzer.snapshots[-1].epoch]
                 
-                logging.info(f"Using fixed axis limit: ±{etf_scale:.3f} (based on ETF scale)")
-                
-                # Create folders for 3D and 2D visualizations
-                viz_3d_dir = output_dir / '3d-snapshots'
-                viz_2d_dir = output_dir / '2d-snapshots'
-                viz_3d_dir.mkdir(exist_ok=True)
-                viz_2d_dir.mkdir(exist_ok=True)
-                
-                # Visualize ALL snapshots with fixed axes (every nc_snapshot_interval steps)
-                logging.info(f"Creating {len(nc_analyzer.snapshots)} 3D and 2D visualizations...")
-                logging.info("  3D visualizations in: 3d-snapshots/")
-                logging.info("  2D visualizations in: 2d-snapshots/ (better for angle interpretation)")
-                
-                for i, snapshot in enumerate(nc_analyzer.snapshots):
-                    if (i + 1) % 50 == 0:  # Progress indicator every 50 snapshots
-                        logging.info(f"  Progress: {i + 1}/{len(nc_analyzer.snapshots)} visualizations")
-                    
-                    # Create 3D visualization
-                    nc_analyzer.visualize_neural_collapse(
-                        snapshot=snapshot,
-                        selected_classes=list(range(min(3, config.data.num_classes))),
-                        samples_per_class=20,
-                        save_path=viz_3d_dir / f'nc_viz_step_{snapshot.epoch:08d}.png',
-                        axis_limit=etf_scale  # Fixed axes across all snapshots
-                    )
-                    
-                    # Create 2D visualization (easier to interpret angles)
-                    nc_analyzer.visualize_neural_collapse_2d(
-                        snapshot=snapshot,
-                        selected_classes=list(range(min(3, config.data.num_classes))),
-                        samples_per_class=20,
-                        save_path=viz_2d_dir / f'nc_viz_step_{snapshot.epoch:08d}.png',
-                        axis_limit=etf_scale  # Fixed axes across all snapshots
-                    )
-                
-                logging.info(f"Completed all {len(nc_analyzer.snapshots)} visualizations")
-                
-                # Create videos from snapshots
-                logging.info("Creating videos from snapshots...")
-                
-                # Create 3D video
-                video_3d_path = output_dir / 'nc_evolution_3d.mp4'
-                create_video_from_images(
-                    image_dir=viz_3d_dir,
-                    output_path=video_3d_path,
-                    pattern='nc_viz_step_*.png',
-                    fps=2.0  # 0.5 seconds per frame
+                create_nc_figure1_evolution(
+                    snapshots=nc_analyzer.snapshots,
+                    output_dir=output_dir,
+                    selected_epochs=selected_epochs,
+                    normalize_vectors=True,  # Normalize for angular structure
+                    show_etf=True,
+                    show_features=True,
+                    fps=2.0
                 )
-                
-                # Create 2D video
-                video_2d_path = output_dir / 'nc_evolution_2d.mp4'
-                create_video_from_images(
-                    image_dir=viz_2d_dir,
-                    output_path=video_2d_path,
-                    pattern='nc_viz_step_*.png',
-                    fps=2.0  # 0.5 seconds per frame
-                )
-                
-                logging.info("Videos created successfully!")
             
             logging.info(f"Neural Collapse analysis saved ({len(nc_analyzer.snapshots)} snapshots)")
         

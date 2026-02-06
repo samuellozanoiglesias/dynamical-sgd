@@ -19,7 +19,8 @@ def generate_spiral_data(
     noise_std: float = 0.2,
     random_seed: Optional[int] = None,
     angular_offsets: Optional[List[float]] = None,
-    randomize_offsets: bool = False
+    randomize_offsets: bool = False,
+    min_radius: float = 0.05
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     Generate spiral dataset with multiple classes.
@@ -35,6 +36,7 @@ def generate_spiral_data(
                         If None and randomize_offsets=True: generates random offsets
         randomize_offsets: If True and angular_offsets is None, generates random angular offsets
                           This breaks the perfect 120° symmetry for neural collapse experiments
+        min_radius: Minimum radius to avoid points collapsing at origin (0,0). Default 0.05.
         
     Returns:
         Tuple of (features, labels) where features are (N, 2) and labels are one-hot (N, num_classes)
@@ -65,7 +67,8 @@ def generate_spiral_data(
         ix = slice(N * j, N * (j + 1))
         
         # Spiral parameters
-        r = jnp.linspace(0., 1, N)  # radius
+        # Start from min_radius instead of 0 to avoid points at origin (0,0)
+        r = jnp.linspace(min_radius, 1, N)  # radius
         omega = offsets[j]  # angular offset for this class
         theta_max = revolutions * pi
         

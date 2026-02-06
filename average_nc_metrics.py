@@ -271,9 +271,13 @@ def average_experiment_metrics(
             
             if analyzer is None:
                 # Initialize analyzer based on first snapshot
+                # Default to 1 hidden layer if not specified in snapshot
                 analyzer = NeuralCollapseAnalyzer(
                     num_classes=snapshots[0].num_classes,
-                    feature_dim=snapshots[0].feature_dim
+                    feature_dim=snapshots[0].feature_dim,
+                    num_hidden_layers=1,  # Default value for backward compatibility
+                    use_batchnorm=True,  # Default for backward compatibility
+                    use_bias=True  # Default for backward compatibility
                 )
             
             # Extract NC metrics and angles

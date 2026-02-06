@@ -1,65 +1,358 @@
 """
-Neural Collapse Analysis Module
+Neural Collapse Analysis Module (Simplified)
 
-This module implements the analysis and visualization of Neural Collapse phenomena
-as described in "Prevalence of Neural Collapse during the terminal phase of deep 
-learning training" (Papyan et al., 2020).
+This module implements simplified Neural Collapse metrics following the paper's
+mathematical definitions from "Prevalence of Neural Collapse during the terminal 
+phase of deep learning training" (Papyan et al., 2020).
 
-Neural Collapse refers to the phenomenon where, during the terminal phase of training:
-1. NC1 (Variability Collapse): Within-class features collapse to their class means
-2. NC2 (Convergence to Simplex ETF): Class means converge to vertices of a Simplex 
-   Equiangular Tight Frame
-3. NC3 (Self-Duality): Classifiers and class means become dual to each other
-4. NC4 (Simplification to NCC): Decision boundaries simplify to nearest class center
+Neural Collapse metrics (paper-exact formulas):
+1. NC1 (Variability Collapse): Trace(Σ_W @ Σ_B^†) / C
+   - Σ_W = Σ_c π_c E[(h - μ_c)(h - μ_c)^T | y=c]
+   - Σ_B = Σ_c π_c (μ_c - μ_G)(μ_c - μ_G)^T
+   - Uses Moore-Penrose pseudoinverse (no regularization)
+2. NC2 (Equinorm): Coefficient of variation of ||μ_c - μ_G||
+3. NC2 (Equiangularity): Std and Mean of off-diagonal Gram matrix
+4. NC3 (Self-Duality): ||Ŵ^T - M̂||_F (Frobenius norm)
+5. NC7 (Nearest Class-Center): Proportion of test samples where classifier ≠ NCC
 
-🔴 CRITICAL MATHEMATICAL PRINCIPLES 🔴
-This implementation follows strict geometric principles to avoid measurement artifacts:
+Bias-Agnostic Design:
+- Supports classifiers with or without bias terms (configurable via use_bias flag)
+- use_bias applies ONLY to the final classifier layer (hidden layers always have bias)
+- With bias: Uses feature space augmentation h̃=[h;1], W̃=[W;b] for theory-aligned metrics
+- Without bias: Standard computation in original feature space
+- All metrics remain mathematically valid in both configurations
 
-1️⃣ Rule 1 — Never measure geometry after adaptive projection
-   ✅ All NC metrics computed in ORIGINAL feature space R^p
-   ✅ Projection used ONLY for visualization
-   ❌ Never compute angles/distances on projected data
-
-2️⃣ Rule 2 — ETF is a target, not a coordinate system  
-   ✅ Fixed theoretical Simplex ETF for comparison
-   ✅ Rotation-invariant alignment via Procrustes analysis
-   ❌ Never use ETF to define projection axes
-
-3️⃣ Rule 3 — Normalization only after centering
-   ✅ Center class means first: μ_c ← μ_c - mean(μ)
-   ✅ Then normalize: μ_c ← μ_c / ||μ_c||
-   ❌ Never: project → normalize → measure
-
-This module provides tools to:
-- Extract last-layer features, class means, and classifiers during training
-- Compute NC metrics in original R^p space (mathematically correct)
-- Project to low-dimensional subspace for visualization only
-- Recreate Figure 1 from the Neural Collapse paper with correct geometry
+All metrics are computed in the appropriate feature space (R^p or R^{p+1}).
 
 Author: Samuel Lozano Iglesias  
 Email: samuel.lozano@ucm.es
 """
 
-import jax
-import jax.numpy as jnp
-from jax import random
-import numpy as np
-from typing import Dict, List, Tuple, Optional, Any
-import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
-import imageio.plugins.ffmpeg
-from matplotlib import cm
-import pickle
-from pathlib import Path
-from dataclasses import dataclass
-import imageio
 import logging
-from mpl_toolkits.mplot3d import Axes3D
-from matplotlib import cm
-import pickle
+import jax.numpy as jnp
+import numpy as np
+import matplotlib.pyplot as plt
+from typing import Dict, List, Tuple, Optional, Any
 from pathlib import Path
 from dataclasses import dataclass
 
+
+# =============================================================================
+# CORE FUNCTIONS: Compute NC Metrics (Paper Definitions)
+# =============================================================================
+
+def compute_nc_metrics(H: jnp.ndarray, labels: jnp.ndarray, W: jnp.ndarray, b: Optional[jnp.ndarray] = None, H_test: Optional[jnp.ndarray] = None, labels_test: Optional[jnp.ndarray] = None) -> dict:
+    """
+    Compute Neural Collapse metrics following the paper's exact mathematical definitions.
+    
+    Supports classifiers with or without bias by augmenting the feature space:
+    - With bias: h̃ = [h; 1], W̃ = [W; b] → bias-free classifier in augmented space
+    - Without bias: Standard computation in original space
+    
+    Args:
+        H: Last-layer features (N, p) where N=num_samples, p=feature_dim
+        labels: Class labels (N,) as integers 0, 1, ..., C-1
+        W: Classifier weights (C, p) where C=num_classes
+        b: Classifier biases (C,) - optional, if None assumes no bias
+        H_test: Last-layer test features (N_test, p) for NC7 computation (optional)
+        labels_test: Test class labels (N_test,) for NC7 computation (optional)
+        
+    Returns:
+        Dictionary with metrics:
+            - nc1_variability: Trace(Σ_W @ Σ_B^†) [paper-exact, no 1/C factor]
+            - nc2_equinorm_cv: Coefficient of variation of centered mean norms
+            - nc2_equiangular_std: Std of off-diagonal Gram matrix elements
+            - nc2_equiangular_mean: Mean of off-diagonal Gram matrix elements
+            - nc3_self_duality: ||Ŵ^T - M̂||_F
+            - nc7_ncc_mismatch: Proportion of test samples where classifier disagrees with NCC
+    """
+    # =============================================================================
+    # Feature Space Augmentation (if bias exists)
+    # =============================================================================
+    # Augment feature space to absorb bias: [h; 1] and [W; b]
+    # This makes all NC metrics bias-agnostic and theory-aligned
+    if b is not None:
+        # Augment training features: H → [H, ones]
+        ones = jnp.ones((H.shape[0], 1))
+        H = jnp.concatenate([H, ones], axis=1)
+        
+        # Augment test features if provided
+        if H_test is not None:
+            ones_test = jnp.ones((H_test.shape[0], 1))
+            H_test = jnp.concatenate([H_test, ones_test], axis=1)
+        
+        # Augment classifier weights: W → [W, b]
+        W = jnp.concatenate([W, b[:, None]], axis=1)
+    
+    N, p = H.shape
+    classes = jnp.unique(labels)
+    C = len(classes)
+    
+    # 1. Compute Class Means (μ_c)
+    class_means = []
+    pi = []
+    for c in range(C):
+        mask = labels == c
+        N_c = jnp.sum(mask)
+        if N_c > 0:
+            mu_c = jnp.sum(H[mask], axis=0) / N_c
+        else:
+            mu_c = jnp.zeros(p)
+        pi.append(N_c / N)
+        class_means.append(mu_c)
+    class_means = jnp.stack(class_means)  # (C, p)
+    pi = jnp.array(pi)
+    
+    # 2. Compute Global Mean (μ_G) weighted by class proportions π_c (paper definition)
+    mu_G = jnp.sum(class_means * pi[:, None], axis=0)
+    
+    # 3. Centered Class Means Matrix M (p, C)
+    M = (class_means - mu_G).T  # (p, C)
+    
+    # =============================================================================
+    # NC2: Equinorm (Coefficient of Variation) - Fig 2
+    # =============================================================================
+    # Class-means norms (blue line in paper)
+    norms_means = jnp.linalg.norm(class_means - mu_G, axis=1)  # (C,)
+    nc2_equinorm_cv_means = jnp.std(norms_means) / (jnp.mean(norms_means) + 1e-8)
+    
+    # Classifiers norms (orange line in paper)
+    norms_classifiers = jnp.linalg.norm(W, axis=1)  # (C,)
+    nc2_equinorm_cv_classifiers = jnp.std(norms_classifiers) / (jnp.mean(norms_classifiers) + 1e-8)
+    
+    # =============================================================================
+    # NC2: Equiangularity - Fig 3 & Fig 4
+    # =============================================================================
+    # Normalize class-means
+    M_normalized = M / (jnp.linalg.norm(M, axis=0, keepdims=True) + 1e-8)  # (p, C)
+    
+    # Normalize classifiers
+    W_normalized = W / (jnp.linalg.norm(W, axis=1, keepdims=True) + 1e-8)  # (C, p)
+    
+    # Gram matrices
+    G_means = jnp.dot(M_normalized.T, M_normalized)  # (C, C)
+    G_classifiers = jnp.dot(W_normalized, W_normalized.T)  # (C, C)
+    
+    # Extract off-diagonal elements
+    mask_off_diag = ~jnp.eye(C, dtype=bool)
+    off_diag_means = G_means[mask_off_diag]
+    off_diag_classifiers = G_classifiers[mask_off_diag]
+    
+    # Fig 3: Std of cosines (blue = means, orange = classifiers)
+    nc2_equiangular_std_means = jnp.std(off_diag_means)
+    nc2_equiangular_std_classifiers = jnp.std(off_diag_classifiers)
+    
+    # Fig 4: Mean deviation from target -1/(C-1)
+    target_angle = -1.0 / (C - 1) if C > 1 else 0.0
+    nc2_equiangular_mean_means = jnp.mean(jnp.abs(off_diag_means - target_angle))
+    nc2_equiangular_mean_classifiers = jnp.mean(jnp.abs(off_diag_classifiers - target_angle))
+    
+    # =============================================================================
+    # NC3: Self-Duality - Fig 5 (Paper's definition)
+    # =============================================================================
+    # Double centering M for numerical stability with class imbalance
+    # Center across classes (already done) and across features
+    M_centered = M - jnp.mean(M, axis=1, keepdims=True)
+    M_hat = M_centered / (jnp.linalg.norm(M_centered, 'fro') + 1e-8)
+    
+    # Center W: subtract mean across classes (Papyan's implicit assumption)
+    # W̃ = W - (1/C) * 1 * 1^T * W = W - mean(W, axis=0)
+    W_centered = W - jnp.mean(W, axis=0, keepdims=True)
+    
+    # Normalize W^T by Frobenius norm (W is (C, p), so W.T is (p, C))
+    W_T = W_centered.T
+    W_hat = W_T / (jnp.linalg.norm(W_T, 'fro') + 1e-8)
+    
+    # NC3 Metric: ||W^T - M||_F^2 (paper's definition)
+    nc3_self_duality = jnp.linalg.norm(W_hat - M_hat, 'fro')
+    
+    # =============================================================================
+    # NC1: Variability Collapse (Paper-Exact Definition) - Fig 6
+    # =============================================================================
+    # Paper formulas:
+    # W = Ave_{i,c} {(h_{i,c} - μ_c)(h_{i,c} - μ_c)^T}
+    # B = Ave_c {(μ_c - μ_G)(μ_c - μ_G)^T}
+    # NC1 = Tr{W @ B^†} / C
+    
+    # Within-Class Covariance W: average over ALL samples
+    Sigma_W = jnp.zeros((p, p))
+    for c in range(C):
+        mask = labels == c
+        if jnp.sum(mask) > 0:
+            H_c = H[mask]  # Features for class c (N_c, p)
+            centered = H_c - class_means[c]  # (N_c, p)
+            Sigma_W += jnp.dot(centered.T, centered)  # (p, p)
+    Sigma_W = Sigma_W / N  # Ave_{i,c}
+    
+    # Between-Class Covariance B: weighted average over classes (weighted by π_c)
+    # Paper definition: Σ_B = Σ_c π_c (μ_c - μ_G)(μ_c - μ_G)^T
+    Sigma_B = jnp.zeros((p, p))
+    for c in range(C):
+        centered_mean = class_means[c] - mu_G  # (p,)
+        Sigma_B += pi[c] * jnp.outer(centered_mean, centered_mean)  # (p, p)
+    # Already weighted by π_c in the loop, no need to divide by C
+    
+    # NC1 Metric: Tr{W @ B^†} / C using Moore-Penrose pseudoinverse
+    B_pinv = jnp.linalg.pinv(Sigma_B)
+    nc1_variability = jnp.trace(Sigma_W @ B_pinv) / C
+    
+    # =============================================================================
+    # NC4: Nearest Class-Center (NCC) Mismatch - Fig 7
+    # =============================================================================
+    # Proportion of test examples where classifier disagrees with NCC decision
+    # Following Papyan's definition: use centered features and inner products
+    if H_test is not None and labels_test is not None:
+        # Classifier predictions: arg max_c (W @ h_test)
+        # Note: If bias was present, it's already absorbed in augmented W and H_test
+        logits_test = jnp.dot(H_test, W.T)  # (N_test, C)
+        classifier_predictions = jnp.argmax(logits_test, axis=1)  # (N_test,)
+        
+        # NCC predictions: arg max_c ⟨h - μ_G, μ_c - μ_G⟩ (centered inner product)
+        # This is theoretically equivalent to NCC and numerically more stable
+        # than distance-based NCC, especially when NC2 is not fully collapsed.
+        # In Neural Collapse terminal phase: classifier decision ≈ NCC decision
+        h_centered = H_test - mu_G  # (N_test, p) - center test features
+        means_centered = class_means - mu_G  # (C, p) - center class means
+        
+        # Compute inner products: (N_test, p) @ (p, C) = (N_test, C)
+        scores = jnp.dot(h_centered, means_centered.T)  # (N_test, C)
+        ncc_predictions = jnp.argmax(scores, axis=1)  # (N_test,)
+        
+        # Proportion of disagreements
+        disagreements = jnp.sum(classifier_predictions != ncc_predictions)
+        nc4_ncc_mismatch = float(disagreements / H_test.shape[0])
+    else:
+        nc4_ncc_mismatch = None
+    
+    result = {
+        # Fig 2: NC2 - Equinorm (blue = means, orange = classifiers)
+        'nc2_equinorm_cv_means': float(nc2_equinorm_cv_means),
+        'nc2_equinorm_cv_classifiers': float(nc2_equinorm_cv_classifiers),
+        # Fig 3: NC2 - Equiangularity Std (blue = means, orange = classifiers)
+        'nc2_equiangular_std_means': float(nc2_equiangular_std_means),
+        'nc2_equiangular_std_classifiers': float(nc2_equiangular_std_classifiers),
+        # Fig 4: NC2 - Equiangularity Mean (blue = means, orange = classifiers)
+        'nc2_equiangular_mean_means': float(nc2_equiangular_mean_means),
+        'nc2_equiangular_mean_classifiers': float(nc2_equiangular_mean_classifiers),
+        'nc2_equiangular_target': float(-1.0 / (C - 1)) if C > 1 else 0.0,
+        # Fig 5: NC3 - Self-Duality
+        'nc3_self_duality': float(nc3_self_duality),
+        # Fig 6: NC1 - Variability Collapse
+        'nc1_variability': float(nc1_variability),
+    }
+    
+    # Fig 7: NC4 - Nearest Class-Center Mismatch (only if test data provided)
+    if nc4_ncc_mismatch is not None:
+        result['nc7_ncc_mismatch'] = nc4_ncc_mismatch  # Keep old key for backward compatibility
+    
+    return result
+
+
+def get_features_and_weights(params: Any, X: jnp.ndarray, num_hidden_layers: int = 1, use_batchnorm: bool = True, use_bias: bool = True) -> Tuple[jnp.ndarray, jnp.ndarray, Optional[jnp.ndarray]]:
+    """
+    Extract last-layer features H, classifier weights W, and biases b from model.
+    
+    Works with Neural Collapse compliant architecture:
+    - With BatchNorm: x → [Dense → BatchNorm → ReLU] × num_hidden_layers → h(x) → Dense → logits
+    - Without BatchNorm: x → [Dense → ReLU] × num_hidden_layers → h(x) → Dense → logits
+    
+    Args:
+        params: Model parameters (list of layer params)
+        X: Input data (N, input_dim)
+        num_hidden_layers: Number of hidden layer blocks (default: 1)
+        use_batchnorm: Whether the model uses BatchNorm (default: True)
+        use_bias: Whether the CLASSIFIER uses bias (default: True)
+                  Note: Hidden layers always use bias (standard architecture)
+        
+    Returns:
+        Tuple of (H, W, b):
+            - H: Last-layer features (N, p)
+            - W: Classifier weights (C, p)
+            - b: Classifier biases (C,) if use_bias=True, else None
+    """
+    # Extract features from all hidden layer blocks
+    h = X
+    
+    if use_batchnorm:
+        # Process each Dense → BatchNorm → ReLU block
+        # NOTE: In JAX stax params list, each LAYER is ONE entry:
+        #   - Dense layer = 1 entry: (W, b) tuple
+        #   - BatchNorm layer = 1 entry: (gamma, beta, mean, var) tuple
+        # So each block has 2 entries total (Dense + BatchNorm)
+        for block_idx in range(num_hidden_layers):
+            param_idx = block_idx * 2  # 2 entries per block
+            
+            # Dense layer - params[param_idx] is a tuple (W, b)
+            # Hidden layers ALWAYS have bias (standard architecture)
+            W_dense, b_dense = params[param_idx]
+            h = jnp.dot(h, W_dense) + b_dense
+            
+            # BatchNorm layer - params[param_idx + 1] is a tuple (gamma, beta, mean, var)
+            bn_params = params[param_idx + 1]
+            if len(bn_params) == 4:
+                gamma, beta, running_mean, running_var = bn_params
+                h = gamma * (h - running_mean) / jnp.sqrt(running_var + 1e-5) + beta
+            
+            # ReLU activation
+            h = jnp.maximum(0, h)
+        
+        # Final classifier layer index
+        # JAX stax creates empty tuples for ReLU, so: Dense + BatchNorm + ReLU = 3 entries
+        classifier_idx = num_hidden_layers * 3
+    else:
+        # Process each Dense → ReLU block (no BatchNorm)
+        for block_idx in range(num_hidden_layers):
+            # Dense layer - hidden layers ALWAYS have bias
+            W_dense, b_dense = params[block_idx * 2]  # Skip ReLU empty tuples
+            h = jnp.dot(h, W_dense) + b_dense
+            
+            # ReLU activation
+            h = jnp.maximum(0, h)
+        
+        # Final classifier layer index
+        # JAX stax creates empty tuples for ReLU, so: Dense + ReLU = 2 entries
+        classifier_idx = num_hidden_layers * 2
+    
+    H = h  # Last-layer features
+    
+    # Extract classifier weights (final Dense layer)
+    # use_bias flag applies ONLY to the classifier, not hidden layers
+    try:
+        classifier_params = params[classifier_idx]
+        if use_bias:
+            W_last, b_last = classifier_params
+            W = W_last.T  # (C, p)
+            b = b_last    # (C,)
+        else:
+            # No bias in classifier
+            W_last = classifier_params[0] if isinstance(classifier_params, tuple) else classifier_params
+            W = W_last.T  # (C, p)
+            b = None
+    except (ValueError, IndexError) as e:
+        # Debug info for parameter indexing issues
+        import logging
+        logging.error(f"Error extracting classifier weights:")
+        logging.error(f"  use_batchnorm={use_batchnorm}")
+        logging.error(f"  use_bias={use_bias}")
+        logging.error(f"  num_hidden_layers={num_hidden_layers}")
+        logging.error(f"  classifier_idx={classifier_idx}")
+        logging.error(f"  len(params)={len(params)}")
+        logging.error(f"  params structure: {[type(p).__name__ if not isinstance(p, tuple) else f'tuple(len={len(p)})' for p in params]}")
+        for i, p in enumerate(params):
+            if isinstance(p, tuple):
+                logging.error(f"    params[{i}] = tuple with {len(p)} elements")
+                if len(p) == 2:
+                    logging.error(f"      shapes: ({p[0].shape}, {p[1].shape})")
+            else:
+                logging.error(f"    params[{i}] = {type(p).__name__}")
+        raise
+    
+    return H, W, b
+
+
+# =============================================================================
+# SNAPSHOT DATA CLASS
+# =============================================================================
 
 @dataclass
 class NeuralCollapseSnapshot:
@@ -75,6 +368,7 @@ class NeuralCollapseSnapshot:
         biases: Bias vectors (C,) from last layer (b in W*h+b)
         num_classes: Number of classes
         feature_dim: Feature dimension p
+        metrics: Dictionary of NC metrics computed in original R^p space
     """
     epoch: int
     features: jnp.ndarray
@@ -84,28 +378,35 @@ class NeuralCollapseSnapshot:
     biases: jnp.ndarray
     num_classes: int
     feature_dim: int
+    metrics: Optional[Dict[str, float]] = None
 
+
+# =============================================================================
+# NEURAL COLLAPSE ANALYZER (Simplified)
+# =============================================================================
 
 class NeuralCollapseAnalyzer:
     """
-    Analyzer for Neural Collapse phenomena in neural networks.
-    
-    This class provides methods to:
-    1. Extract and store network states during training
-    2. Compute Neural Collapse metrics
-    3. Generate visualizations similar to Figure 1 in the Neural Collapse paper
+    Simplified Neural Collapse analyzer using paper's metric definitions.
     """
     
-    def __init__(self, num_classes: int, feature_dim: int):
+    def __init__(self, num_classes: int, feature_dim: int, num_hidden_layers: int = 1, use_batchnorm: bool = True, use_bias: bool = True):
         """
         Initialize Neural Collapse analyzer.
         
         Args:
             num_classes: Number of classes in the classification task
             feature_dim: Dimension of last-layer features
+            num_hidden_layers: Number of Dense → [BatchNorm] → ReLU blocks (default: 1)
+            use_batchnorm: Whether the model uses BatchNorm layers (default: True)
+            use_bias: Whether the CLASSIFIER uses bias (default: True)
+                      Note: Hidden layers always use bias (standard architecture)
         """
         self.num_classes = num_classes
         self.feature_dim = feature_dim
+        self.num_hidden_layers = num_hidden_layers
+        self.use_batchnorm = use_batchnorm
+        self.use_bias = use_bias
         self.snapshots: List[NeuralCollapseSnapshot] = []
         
     def extract_features_and_classifiers(
@@ -114,40 +415,64 @@ class NeuralCollapseAnalyzer:
         params: Any,
         X: jnp.ndarray,
         Y: jnp.ndarray,
-        epoch: int
+        epoch: int,
+        X_test: Optional[jnp.ndarray] = None,
+        Y_test: Optional[jnp.ndarray] = None
     ) -> NeuralCollapseSnapshot:
         """
-        Extract last-layer features, class means, and classifiers from the network.
+        Extract features, classifiers and compute NC metrics.
         
         Args:
-            model_fn: Model function that returns both predictions and last-layer features
+            model_fn: Model function (not used, kept for compatibility)
             params: Current model parameters
             X: Input data (N, input_dim)
             Y: One-hot labels (N, num_classes)
             epoch: Current training epoch
+            X_test: Test input data (N_test, input_dim) for NC7 computation (optional)
+            Y_test: Test one-hot labels (N_test, num_classes) for NC7 computation (optional)
             
         Returns:
-            NeuralCollapseSnapshot containing extracted information
+            NeuralCollapseSnapshot containing extracted information and metrics
         """
         # Convert one-hot labels to class indices
         labels = jnp.argmax(Y, axis=1)
         
-        # Extract last-layer features
-        # Assuming model_fn can return features when requested
-        # We'll need to modify the model to expose features
-        features = self._extract_features(model_fn, params, X)
-
-        # Compute global means of features (average of all feature vectors)
-        global_mean = jnp.mean(features, axis=0)
+        # Extract features and weights using the new architecture
+        features, classifiers, biases = get_features_and_weights(params, X, self.num_hidden_layers, self.use_batchnorm, self.use_bias)
         
-        # Compute class means (average feature vector per class)
-        class_means = self._compute_class_means(features, labels)
-
-        # Compute centered means
-        centered_means = class_means - global_mean
+        # Extract test features if provided
+        H_test = None
+        labels_test = None
+        if X_test is not None and Y_test is not None:
+            labels_test = jnp.argmax(Y_test, axis=1)
+            H_test, _, _ = get_features_and_weights(params, X_test, self.num_hidden_layers, self.use_batchnorm, self.use_bias)
         
-        # Extract classifier weights (last layer weights) and biases
-        classifiers, biases = self._extract_classifiers(params)
+        # Compute class means
+        class_means = []
+        for c in range(self.num_classes):
+            mask = labels == c
+            if jnp.sum(mask) > 0:
+                class_mean = jnp.mean(features[mask], axis=0)
+            else:
+                class_mean = jnp.zeros(self.feature_dim)
+            class_means.append(class_mean)
+        class_means = jnp.stack(class_means)
+        
+        # Extract biases from final classifier layer
+        # Calculate classifier index based on architecture
+        # In JAX stax, each LAYER creates ONE entry (including empty tuples for ReLU):
+        #   - Dense = 1 entry: (W, b)
+        #   - BatchNorm = 1 entry: (gamma, beta, mean, var)
+        #   - ReLU = 1 entry: () empty tuple
+        if self.use_batchnorm:
+            classifier_idx = self.num_hidden_layers * 3  # Dense + BatchNorm + ReLU
+        else:
+            classifier_idx = self.num_hidden_layers * 2  # Dense + ReLU
+        # biases already extracted in get_features_and_weights
+        
+        # Compute NC metrics in original R^p space (including NC7 if test data provided)
+        # Pass biases to enable bias-agnostic computation via feature augmentation
+        metrics = compute_nc_metrics(features, labels, classifiers, biases, H_test, labels_test)
         
         snapshot = NeuralCollapseSnapshot(
             epoch=epoch,
@@ -157,1117 +482,290 @@ class NeuralCollapseAnalyzer:
             classifiers=classifiers,
             biases=biases,
             num_classes=self.num_classes,
-            feature_dim=self.feature_dim
+            feature_dim=self.feature_dim,
+            metrics=metrics
         )
         
         self.snapshots.append(snapshot)
         return snapshot
     
-    def _extract_features(
-        self,
-        model_fn: Any,
-        params: Any,
-        X: jnp.ndarray
-    ) -> jnp.ndarray:
+    def compute_nc_metrics(self, snapshot: NeuralCollapseSnapshot) -> Dict[str, float]:
         """
-        Extract last-layer features (activations before final linear layer).
-        
-        For SpiralClassifier architecture: Dense -> ReLU -> Dense
-        This extracts features after the first Dense+ReLU.
-        """
-        # Apply first layer: Dense + ReLU (same as extract_penultimate_features)
-        W1, b1 = params[0]
-        features = jnp.maximum(0, jnp.dot(X, W1) + b1)
-        return features
-    
-    def _compute_class_means(
-        self,
-        features: jnp.ndarray,
-        labels: jnp.ndarray
-    ) -> jnp.ndarray:
-        """
-        Compute class mean vectors (centroids) for each class.
+        Compute NC metrics for a snapshot (uses metrics already computed).
         
         Args:
-            features: Feature vectors (N, p)
-            labels: Class labels (N,)
+            snapshot: Network state snapshot
             
         Returns:
-            Class means (C, p)
+            Dictionary of NC metrics
         """
-        class_means = []
-        for c in range(self.num_classes):
-            mask = labels == c
-            if jnp.sum(mask) > 0:
-                class_mean = jnp.mean(features[mask], axis=0)
-            else:
-                class_mean = jnp.zeros(self.feature_dim)
-            class_means.append(class_mean)
+        if snapshot.metrics is not None:
+            return snapshot.metrics
         
-        return jnp.stack(class_means)
+        # Recompute if not available (pass biases for bias-agnostic computation)
+        return compute_nc_metrics(snapshot.features, snapshot.labels, snapshot.classifiers, snapshot.biases)
     
-    def _extract_classifiers(self, params: Any) -> Tuple[jnp.ndarray, jnp.ndarray]:
-        """
-        Extract classifier weight vectors and biases from the last layer.
-        
-        Args:
-            params: Model parameters
-            
-        Returns:
-            Tuple of (classifiers, biases):
-                - classifiers: Weight matrix (C, p) where each row is a class weight vector
-                - biases: Bias vector (C,) where each element is the bias for that class
-        """
-        # For JAX stax models, params is a list of (W, b) tuples
-        # Last layer weights are params[-1][0], shape (p, C)
-        # Last layer biases are params[-1][1], shape (C,)
-        last_layer_weights = params[-1][0]
-        last_layer_biases = params[-1][1]
-        
-        # Transpose weights to (C, p) for easier handling
-        classifiers = last_layer_weights.T
-        
-        return classifiers, last_layer_biases
+    def save_snapshots(self, filepath: Path):
+        """Save snapshots to file."""
+        import pickle
+        with open(filepath, 'wb') as f:
+            pickle.dump(self.snapshots, f)
+        logging.info(f"Saved {len(self.snapshots)} snapshots to {filepath}")
     
-    def compute_simplex_etf(self, num_classes: Optional[int] = None) -> jnp.ndarray:
+    def load_snapshots(self, filepath: Path):
+        """Load snapshots from file."""
+        import pickle
+        with open(filepath, 'rb') as f:
+            self.snapshots = pickle.load(f)
+        logging.info(f"Loaded {len(self.snapshots)} snapshots from {filepath}")
+    
+    def compute_simplex_etf(self, num_classes=None):
         """
-        Compute the Simplex Equiangular Tight Frame (ETF).
+        Compute simplex ETF (stub for compatibility).
         
-        The Simplex ETF is the theoretical optimal configuration for class means
-        in Neural Collapse. It consists of C vectors in R^(C-1) that are:
-        - Unit norm
-        - Equidistant from each other
-        - Centered at origin
-        
-        The inner product between any two different vectors is -1/(C-1).
-        
-        Args:
-            num_classes: Number of classes (uses self.num_classes if None)
-            
-        Returns:
-            Simplex ETF vectors (C, C-1)
+        In simplified version, this is not needed for metrics.
+        Returns identity matrix for compatibility.
         """
         if num_classes is None:
             num_classes = self.num_classes
         
         C = num_classes
-        
-        # Create the Simplex ETF in R^(C-1)
-        # We construct it using the standard simplex and centering
-        
-        # Start with standard basis vectors in R^C
+        # Simple identity-based placeholder
         identity = jnp.eye(C)
-        
-        # Center them (subtract mean)
         centered = identity - jnp.ones((C, C)) / C
-        
-        # Remove the zero eigenvalue direction (project to R^(C-1))
-        # Use SVD to get the top (C-1) components
         U, S, Vt = jnp.linalg.svd(centered, full_matrices=False)
-        
-        # Take the top (C-1) singular vectors
         etf = U[:, :C-1] * jnp.sqrt(C / (C - 1))
-        
         return etf
     
-    def project_to_subspace(
-        self,
-        features: jnp.ndarray,
-        class_means: jnp.ndarray,
-        classifiers: jnp.ndarray,
-        target_dim: int = 3,
-        normalize: bool = True
-    ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    def visualize_neural_collapse(self, snapshot, selected_classes=None, samples_per_class=50, 
+                                  save_path=None, title=None, elevation=20, azimuth=45, 
+                                  axis_limit=None, **kwargs):
         """
-        Project features, class means, and classifiers to low-dimensional subspace.
+        Visualize Neural Collapse (stub for simplified version).
         
-        ⚠️  VISUALIZATION ONLY - NEVER COMPUTE METRICS ON PROJECTED DATA ⚠️
-        
-        This function is PURELY for visualization purposes. All Neural Collapse
-        metrics MUST be computed in the original feature space R^p before calling
-        this function. Projection creates visual artifacts that would make metrics
-        meaningless.
-        
-        Uses SVD of class means to find the principal subspace for visualization.
-        The projection basis is fixed per snapshot to avoid adaptive artifacts.
-        
-        Args:
-            features: Feature vectors (N, p)
-            class_means: Class mean vectors (C, p)
-            classifiers: Classifier weight vectors (C, p)
-            target_dim: Target dimension for visualization (default: 3 for 3D plots)
-            normalize: If True, normalize projected vectors for better visualization
-            
-        Returns:
-            Tuple of (projected_features, projected_means, projected_classifiers, etf, basis)
-            where all outputs are for VISUALIZATION ONLY:
-            - projected_features: (N, target_dim)
-            - projected_means: (C, target_dim)
-            - projected_classifiers: (C, target_dim)
-            - etf: (C, target_dim) - Theoretical ETF for visual reference
-            - basis: (p, target_dim) - projection matrix
+        In the simplified version, we focus on metrics rather than visualizations.
         """
-        # Center the class means by subtracting their global centroid
-        # This is crucial for PCA to work correctly and avoid all points
-        # appearing on one side of the principal components
-        global_mean = jnp.mean(class_means, axis=0, keepdims=True)
-        centered_class_means = class_means - global_mean
-        
-        # Compute SVD of centered class means
-        # This finds the subspace spanned by the class centroids
-        U, S, Vt = jnp.linalg.svd(centered_class_means, full_matrices=False)
-        
-        # The top (C-1) or target_dim components span the relevant subspace
-        k = min(target_dim, self.num_classes - 1, class_means.shape[1])
-        basis = Vt[:k, :].T  # (p, k) - projection matrix
-        
-        # Center all data by the same global mean before projection
-        centered_features = features - global_mean
-        centered_classifiers = classifiers - global_mean
-        
-        # Project everything onto this subspace
-        projected_features = centered_features @ basis  # (N, k)
-        projected_means = centered_class_means @ basis  # (C, k)
-        projected_classifiers = centered_classifiers @ basis  # (C, k)
-        
-        # Compute Simplex ETF directly in the target dimension
-        # This is the FIXED theoretical optimal configuration
-        C = self.num_classes
-        identity = jnp.eye(C)
-        centered = identity - jnp.ones((C, C)) / C
-        U_etf, S_etf, Vt_etf = jnp.linalg.svd(centered, full_matrices=False)
-        etf_full = U_etf[:, :C-1] * jnp.sqrt(C / (C - 1))
-        
-        # Take first k dimensions of ETF
-        if k < C - 1:
-            etf = etf_full[:, :k]
-        else:
-            etf = etf_full
-        
-        # Pad to target_dim if needed
-        if etf.shape[1] < k:
-            padding = jnp.zeros((C, k - etf.shape[1]))
-            etf = jnp.concatenate([etf, padding], axis=1)
-        
-        # Normalize vectors to unit length for angle visualization
-        if normalize:
-            # Scale features to fit within unit disk (not normalize to unit circle)
-            # Find the maximum norm among all features
-            feature_norms = jnp.linalg.norm(projected_features, axis=1, keepdims=True)
-            max_feature_norm = jnp.max(feature_norms)
-            # Scale features so the largest one touches the unit circle, others inside
-            if max_feature_norm > 1e-8:
-                projected_features = projected_features / (max_feature_norm + 1e-8)
-            
-            # Normalize class means to unit length
-            mean_norms = jnp.linalg.norm(projected_means, axis=1, keepdims=True)
-            projected_means = projected_means / (mean_norms + 1e-8)
-            
-            # Normalize classifiers to unit length
-            classifier_norms = jnp.linalg.norm(projected_classifiers, axis=1, keepdims=True)
-            projected_classifiers = projected_classifiers / (classifier_norms + 1e-8)
-            
-            # ETF is already unit normalized
-        
-        return projected_features, projected_means, projected_classifiers, etf, basis
+        logging.info(f"Skipping 3D visualization for epoch {snapshot.epoch} (simplified NC version)")
     
-    def compute_angle_degrees(self, v1: jnp.ndarray, v2: jnp.ndarray) -> float:
+    def visualize_neural_collapse_2d(self, snapshot, selected_classes=None, samples_per_class=50,
+                                     save_path=None, title=None, axis_limit=None, **kwargs):
         """
-        Compute angle in degrees between two vectors.
+        Visualize Neural Collapse in 2D (stub for simplified version).
         
-        Args:
-            v1: First vector
-            v2: Second vector
-            
-        Returns:
-            Angle in degrees
+        In the simplified version, we focus on metrics rather than visualizations.
         """
-        norm1 = jnp.linalg.norm(v1)
-        norm2 = jnp.linalg.norm(v2)
-        if norm1 < 1e-8 or norm2 < 1e-8:
-            return 0.0
-        cos_angle = jnp.dot(v1, v2) / (norm1 * norm2)
-        cos_angle = jnp.clip(cos_angle, -1.0, 1.0)
-        return float(jnp.arccos(cos_angle) * 180.0 / jnp.pi)
-    
-    def compute_pairwise_angles(self, vectors: jnp.ndarray, vector_name: str):
-        """
-        Compute all pairwise angles between a set of vectors.
-        
-        Args:
-            vectors: Array of shape (N, D) containing N vectors
-            
-        Returns:
-            Array of angles in degrees (excluding diagonal), shape (N*(N-1)/2,)
-        """
-        N = vectors.shape[0]
-        angles = []
-        pair_names = []
-        for i in range(N):
-            for j in range(i+1, N):
-                angle = self.compute_angle_degrees(vectors[i], vectors[j])
-                angles.append(angle)
-                pair_names.append(f"{vector_name}_{i}-{vector_name}_{j}")
-        
-        angles = jnp.array(angles)
-
-        # Theoretical optimal angle for C classes
-        if N > 1:
-            optimal_cos = -1.0 / (N - 1)
-            optimal_angle = float(jnp.arccos(optimal_cos) * 180.0 / jnp.pi)
-        else:
-            optimal_angle = 0.0
-        
-        return {
-            'mean_angle': float(jnp.mean(angles)) if len(angles) > 0 else 0.0,
-            'std_angle': float(jnp.std(angles)) if len(angles) > 0 else 0.0,
-            'min_angle': float(jnp.min(angles)) if len(angles) > 0 else 0.0,
-            'max_angle': float(jnp.max(angles)) if len(angles) > 0 else 0.0,
-            'optimal_angle': optimal_angle,
-            'angle_deviation': float(jnp.mean(jnp.abs(angles - optimal_angle))) if len(angles) > 0 else 0.0,
-            'all_angles': angles.tolist(),
-            'pair_names': pair_names
-        }
-    
-    def compute_all_angles_in_original_space(self, snapshot: NeuralCollapseSnapshot) -> Dict[str, Dict[str, float]]:
-        """
-        Compute true geometric angles for ALL components in original feature space R^p.
-        
-        This computes angles for:
-        1. Class means (should converge to simplex angles)
-        2. Classifiers (should converge to simplex angles) 
-        3. Biases (typically anti-aligned, ~180° apart)
-        4. Alignment between class means and classifiers (should → 0°)
-        
-        For perfect Neural Collapse simplex configuration:
-        - 3 classes: 120° between all pairs
-        - 4 classes: ~109.47° (tetrahedral angles)
-        - General C classes: arccos(-1/(C-1))
-        
-        Args:
-            snapshot: Network state snapshot
-            
-        Returns:
-            Dictionary with angle statistics for each component type
-        """        
-        # 1. Class means angles
-        class_means_angles = self.compute_pairwise_angles(snapshot.class_means, "mean")
-        
-        # 2. Classifiers angles  
-        classifiers_angles = self.compute_pairwise_angles(snapshot.classifiers, "classifier")
-        
-        # 3. Bias angles (note: biases are 1D, so we need to embed them in feature space)
-        # For neural collapse, biases tend to anti-align (opposite directions)
-        # We'll treat each bias as a vector pointing in the direction of its classifier
-        bias_vectors = []
-        for i in range(snapshot.num_classes):
-            # Bias direction aligned with classifier direction but scaled by bias magnitude
-            classifier_dir = snapshot.classifiers[i] / (jnp.linalg.norm(snapshot.classifiers[i]) + 1e-8)
-            bias_vector = classifier_dir * snapshot.biases[i]
-            bias_vectors.append(bias_vector)
-        bias_vectors = jnp.stack(bias_vectors)
-        
-        bias_angles = self.compute_pairwise_angles(bias_vectors, "bias")
-        
-        # 4. Alignment between class means and classifiers (should be 0° for perfect NC)
-        centered_means = snapshot.class_means - jnp.mean(snapshot.class_means, axis=0, keepdims=True)
-        centered_classifiers = snapshot.classifiers - jnp.mean(snapshot.classifiers, axis=0, keepdims=True)
-        
-        # Normalize both
-        mean_norms = jnp.linalg.norm(centered_means, axis=1, keepdims=True)
-        classifier_norms = jnp.linalg.norm(centered_classifiers, axis=1, keepdims=True)
-        
-        normalized_means = centered_means / (mean_norms + 1e-8)
-        normalized_classifiers = centered_classifiers / (classifier_norms + 1e-8)
-        
-        # Compute alignment angles (same class mean vs same class classifier)
-        alignment_angles = []
-        alignment_names = []
-        for i in range(snapshot.num_classes):
-            cos_angle = jnp.dot(normalized_means[i], normalized_classifiers[i])
-            cos_angle = jnp.clip(cos_angle, -1.0, 1.0)
-            angle_deg = float(jnp.arccos(cos_angle) * 180.0 / jnp.pi)
-            alignment_angles.append(angle_deg)
-            alignment_names.append(f"mean_{i}-classifier_{i}")
-        
-        alignment_angles = jnp.array(alignment_angles)
-        
-        alignment_stats = {
-            'mean_angle': float(jnp.mean(alignment_angles)),
-            'std_angle': float(jnp.std(alignment_angles)),
-            'min_angle': float(jnp.min(alignment_angles)),
-            'max_angle': float(jnp.max(alignment_angles)),
-            'optimal_angle': 0.0,  # Perfect alignment should be 0°
-            'angle_deviation': float(jnp.mean(jnp.abs(alignment_angles - 0.0))),
-            'all_angles': alignment_angles.tolist(),
-            'pair_names': alignment_names
-        }
-        
-        return {
-            'class_means': class_means_angles,
-            'classifiers': classifiers_angles, 
-            'biases': bias_angles,
-            'mean_classifier_alignment': alignment_stats
-        }
-    
-    def compute_angles_in_original_space(self, snapshot: NeuralCollapseSnapshot) -> Dict[str, float]:
-        """
-        Backward compatibility wrapper - returns just class means angles.
-        
-        For full analysis, use compute_all_angles_in_original_space().
-        """
-        all_angles = self.compute_all_angles_in_original_space(snapshot)
-        return all_angles['class_means']
-    
-    def compute_nc_metrics(self, snapshot: NeuralCollapseSnapshot) -> Dict[str, float]:
-        """
-        Compute Neural Collapse metrics for a given snapshot.
-        
-        Metrics include:
-        - NC1: Within-class variance (variability collapse)
-        - NC2: Distance to Simplex ETF (convergence to ETF)
-        - NC3: Alignment between classifiers and class means (self-duality)
-        - NC4: Classification accuracy using nearest class center
-        
-        Args:
-            snapshot: Network state snapshot
-            
-        Returns:
-            Dictionary of metric names to values
-        """
-        metrics = {}
-        
-        # NC1: Within-class variance
-        total_variance = 0.0
-        for c in range(snapshot.num_classes):
-            mask = snapshot.labels == c
-            if jnp.sum(mask) > 0:
-                class_features = snapshot.features[mask]
-                class_mean = snapshot.class_means[c]
-                variance = jnp.mean(jnp.sum((class_features - class_mean) ** 2, axis=1))
-                total_variance += variance
-        metrics['nc1_within_class_variance'] = float(total_variance / snapshot.num_classes)
-        
-        # NC2: Distance to Simplex ETF with improved alignment
-        # Project class means to (C-1)-dimensional subspace and compute ETF in same space
-        C = snapshot.num_classes
-        k = C - 1
-        _, projected_means, _, etf, _ = self.project_to_subspace(
-            snapshot.features, snapshot.class_means, snapshot.classifiers, 
-            target_dim=k, normalize=True
-        )
-        
-        # Compute correlation matrix between normalized means and ETF
-        corr_matrix = projected_means @ etf.T
-        
-        # Better alignment metric: Use Frobenius norm after optimal permutation
-        # For now, use mean of maximum correlations (greedy but consistent)
-        # Note: Proper Procrustes would require Hungarian algorithm for optimal matching
-        row_max = jnp.max(corr_matrix, axis=1)
-        etf_alignment = float(jnp.mean(row_max))
-        
-        # Alternative: Use Frobenius norm of best rotation
-        # U, _, Vt = jnp.linalg.svd(corr_matrix)
-        # R = U @ Vt  # Optimal rotation
-        # aligned_means = projected_means @ R.T
-        # etf_alignment = float(jnp.mean(jnp.sum(aligned_means * etf, axis=1)))
-        
-        metrics['nc2_etf_alignment'] = etf_alignment
-        
-        # NC3: Alignment between classifiers and class means
-        # Compute cosine similarity
-        classifier_norms = jnp.linalg.norm(snapshot.classifiers, axis=1, keepdims=True)
-        mean_norms = jnp.linalg.norm(snapshot.class_means, axis=1, keepdims=True)
-        
-        normalized_classifiers = snapshot.classifiers / (classifier_norms + 1e-8)
-        normalized_class_means = snapshot.class_means / (mean_norms + 1e-8)
-        
-        # Diagonal elements = alignment for each class
-        alignment = jnp.diag(normalized_classifiers @ normalized_class_means.T)
-        metrics['nc3_self_duality'] = float(jnp.mean(alignment))
-        
-        return metrics
-    
-    def visualize_neural_collapse(
-        self,
-        snapshot: NeuralCollapseSnapshot,
-        selected_classes: Optional[List[int]] = None,
-        samples_per_class: int = 50,
-        figsize: Tuple[int, int] = (14, 12),
-        save_path: Optional[Path] = None,
-        title: Optional[str] = None,
-        elevation: int = 20,
-        azimuth: int = 45,
-        axis_limit: Optional[float] = None
-    ):
-        """
-        Recreate Figure 1 from the Neural Collapse paper EXACTLY.
-        
-        Visualizes (matching paper description):
-        - Green spheres: Simplex ETF vertices (theoretical optimal configuration)
-        - Red ball-and-sticks: Linear classifiers W (one per class)
-        - Blue ball-and-sticks: Class-means (centroids of features)
-        - Small blue spheres: Last-layer features (individual samples)
-        - Orange ball-and-sticks: Bias vectors b (from W*h+b, showing antialignment)
-        - Different shades distinguish classes
-        
-        As training proceeds: features collapse onto class-means (NC1),
-        class-means converge to Simplex ETF (NC2), classifiers approach
-        class-means (NC3), and biases antialign (separate by 120° for 3 classes).
-        
-        Args:
-            snapshot: Network state to visualize
-            selected_classes: Which classes to visualize (None = all, max 3 for clarity)
-            samples_per_class: Number of feature samples to show per class
-            figsize: Figure size (width, height)
-            save_path: Path to save figure (if provided)
-            title: Custom title (default: based on epoch)
-            elevation: 3D view elevation angle
-            azimuth: 3D view azimuth angle
-            axis_limit: Fixed axis limit for all plots (if None, auto-scale from ETF)
-                       Use same value across all snapshots for consistent comparison
-        """
-        # Select classes to visualize
-        if selected_classes is None:
-            selected_classes = list(range(min(3, snapshot.num_classes)))
-        
-        n_vis_classes = len(selected_classes)
-        
-        # Convert selected_classes to array for JAX indexing
-        selected_classes_array = jnp.array(selected_classes)
-        
-        # Filter data for selected classes
-        mask = jnp.isin(snapshot.labels, selected_classes_array)
-        filtered_features = snapshot.features[mask]
-        filtered_labels = snapshot.labels[mask]
-        filtered_means = snapshot.class_means[selected_classes_array]
-        filtered_classifiers = snapshot.classifiers[selected_classes_array]
-        filtered_biases = snapshot.biases[selected_classes_array]
-        
-        # Sample features for visualization
-        sampled_features = []
-        sampled_labels = []
-        for i, c in enumerate(selected_classes):
-            class_mask = filtered_labels == c
-            class_features = filtered_features[class_mask]
-            
-            n_samples = min(samples_per_class, len(class_features))
-            if n_samples > 0:
-                indices = np.random.choice(len(class_features), n_samples, replace=False)
-                sampled_features.append(class_features[indices])
-                sampled_labels.append(np.full(n_samples, i))
-        
-        if sampled_features:
-            sampled_features = jnp.concatenate(sampled_features, axis=0)
-            sampled_labels = np.concatenate(sampled_labels, axis=0)
-        else:
-            sampled_features = jnp.array([])
-            sampled_labels = np.array([])
-        
-        # Project to 3D subspace using SVD with normalization
-        if len(sampled_features) > 0:
-            proj_features, proj_means, proj_classifiers, etf_3d, basis = self.project_to_subspace(
-                sampled_features, filtered_means, filtered_classifiers, target_dim=3, normalize=True
-            )
-        else:
-            _, proj_means, proj_classifiers, etf_3d, basis = self.project_to_subspace(
-                filtered_features[:1], filtered_means, filtered_classifiers, target_dim=3, normalize=True
-            )
-            proj_features = jnp.array([]).reshape(0, 3)
-        
-        # Project biases to same 3D space
-        # Biases are in the output space, project them as vectors
-        # For visualization, we treat bias as a direction vector in the output space
-        # and project it to the same subspace
-        bias_vectors = []
-        for i in range(n_vis_classes):
-            # Use negative classifier direction scaled by bias magnitude
-            # This shows the anti-alignment property of biases in NC
-            bias_vector = -filtered_classifiers[i] * jnp.abs(filtered_biases[i])
-            bias_vectors.append(bias_vector)
-        bias_vectors = jnp.stack(bias_vectors)
-        
-        proj_biases = bias_vectors @ basis
-        # Normalize biases for angle visualization
-        bias_norms = jnp.linalg.norm(proj_biases, axis=1, keepdims=True)
-        proj_biases = proj_biases / (bias_norms + 1e-8)
-        
-        # ETF is already computed and normalized in project_to_subspace
-        # It's now FIXED and doesn't scale with data
-        
-        # Create 3D plot with better styling
-        fig = plt.figure(figsize=figsize, facecolor='white')
-        ax = fig.add_subplot(111, projection='3d', facecolor='white')
-        
-        # Define colors for each class (using shades of the main colors)
-        # Blue shades for features and class means
-        blue_shades = [
-            (0.2, 0.4 + 0.2*i/n_vis_classes, 0.8),  # Darker to lighter blues
-            (0.3, 0.5 + 0.2*i/n_vis_classes, 0.9),
-            (0.4, 0.6 + 0.2*i/n_vis_classes, 1.0)
-        ][:n_vis_classes]
-        
-        # Red shades for classifiers
-        red_shades = [
-            (0.7 + 0.15*i/n_vis_classes, 0.1, 0.1),  # Different red intensities
-            (0.85 + 0.15*i/n_vis_classes, 0.15, 0.15),
-            (1.0, 0.2, 0.2)
-        ][:n_vis_classes]
-        
-        # Orange shades for biases
-        orange_shades = [
-            (1.0, 0.5 + 0.2*i/n_vis_classes, 0.1),  # Different orange shades
-            (1.0, 0.6 + 0.2*i/n_vis_classes, 0.15),
-            (1.0, 0.7 + 0.2*i/n_vis_classes, 0.2)
-        ][:n_vis_classes]
-        
-        # Green shades for ETF
-        green_base = (0.2, 0.8, 0.2)
-        
-        # 1. Plot Simplex ETF (green spheres) - LARGEST
-        for i in range(n_vis_classes):
-            green_shade = (
-                green_base[0] + 0.15*i/n_vis_classes,
-                green_base[1],
-                green_base[2] - 0.15*i/n_vis_classes
-            )
-            ax.scatter(
-                [etf_3d[i, 0]], [etf_3d[i, 1]], [etf_3d[i, 2]],
-                c=[green_shade], s=600, alpha=0.7, marker='o',
-                edgecolors='darkgreen', linewidths=3,
-                label='Simplex ETF' if i == 0 else None,
-                depthshade=True
-            )
-        
-        # 2. Plot individual features (small blue spheres, by class)
-        if len(proj_features) > 0:
-            for i in range(n_vis_classes):
-                class_mask = sampled_labels == i
-                if jnp.sum(class_mask) > 0:
-                    ax.scatter(
-                        proj_features[class_mask, 0],
-                        proj_features[class_mask, 1],
-                        proj_features[class_mask, 2],
-                        c=[blue_shades[i]], s=25, alpha=0.3,
-                        edgecolors='none',
-                        label=f'Features Class {selected_classes[i]}' if i == 0 else None,
-                        depthshade=True
-                    )
-        
-        # 3. Plot class means (blue ball-and-sticks)
-        for i in range(n_vis_classes):
-            # Ball at the mean (larger than features)
-            ax.scatter(
-                [proj_means[i, 0]], [proj_means[i, 1]], [proj_means[i, 2]],
-                c=[blue_shades[i]], s=400, alpha=0.9, marker='o',
-                edgecolors='darkblue', linewidths=2.5,
-                label='Class Means' if i == 0 else None,
-                depthshade=True
-            )
-            
-            # Stick from origin to mean (thicker)
-            ax.plot(
-                [0, proj_means[i, 0]],
-                [0, proj_means[i, 1]],
-                [0, proj_means[i, 2]],
-                c=blue_shades[i], linewidth=4, alpha=0.8
-            )
-        
-        # 4. Plot classifiers (red ball-and-sticks)
-        for i in range(n_vis_classes):
-            # Ball at the classifier
-            ax.scatter(
-                [proj_classifiers[i, 0]], [proj_classifiers[i, 1]], [proj_classifiers[i, 2]],
-                c=[red_shades[i]], s=400, alpha=0.9, marker='o',
-                edgecolors='darkred', linewidths=2.5,
-                label='Classifiers W' if i == 0 else None,
-                depthshade=True
-            )
-            
-            # Stick from origin to classifier (thicker)
-            ax.plot(
-                [0, proj_classifiers[i, 0]],
-                [0, proj_classifiers[i, 1]],
-                [0, proj_classifiers[i, 2]],
-                c=red_shades[i], linewidth=4, alpha=0.8
-            )
-        
-        # 5. Plot biases (orange ball-and-sticks) - showing antialignment
-        for i in range(n_vis_classes):
-            # Ball at the bias position (normalized direction)
-            ax.scatter(
-                [proj_biases[i, 0]], [proj_biases[i, 1]], [proj_biases[i, 2]],
-                c=[orange_shades[i]], s=300, alpha=0.85, marker='s',  # Square markers
-                edgecolors='darkorange', linewidths=2.5,
-                label='Biases (anti-aligned)' if i == 0 else None,
-                depthshade=True
-            )
-            
-            # Stick from origin to bias (dashed line)
-            ax.plot(
-                [0, proj_biases[i, 0]],
-                [0, proj_biases[i, 1]],
-                [0, proj_biases[i, 2]],
-                c=orange_shades[i], linewidth=3.5, alpha=0.8, linestyle='--'
-            )
-        
-        # Compute TRUE angles in original feature space (all components)
-        all_angles = self.compute_all_angles_in_original_space(snapshot)
-        
-        if n_vis_classes >= 2:
-            # Extract angles for all components  
-            means_angles = all_angles['class_means']
-            classifiers_angles = all_angles['classifiers']
-            biases_angles = all_angles['biases']
-            alignment_angles = all_angles['mean_classifier_alignment']
-        
-        # Origin marker
-        ax.scatter([0], [0], [0], c='black', s=100, marker='x', linewidths=3,
-                  label='Origin', alpha=0.7)
-        
-        # Set labels and title with better fonts and detailed angle information
-        ax.set_xlabel('Principal Component 1', fontsize=13, fontweight='bold')
-        ax.set_ylabel('Principal Component 2', fontsize=13, fontweight='bold')
-        ax.set_zlabel('Principal Component 3', fontsize=13, fontweight='bold')
-        
-        if title is None:
-            if n_vis_classes >= 2:
-                title = f'Neural Collapse at Step {snapshot.epoch}\n'
-                title += f'TRUE Angles in R^{self.feature_dim}: '
-                title += f'Means: {means_angles["mean_angle"]:.1f}° | '
-                title += f'Classifiers: {classifiers_angles["mean_angle"]:.1f}° | '
-                title += f'Biases: {biases_angles["mean_angle"]:.1f}°\n'
-                title += f'Alignment: {alignment_angles["mean_angle"]:.1f}° | '
-                title += f'Targets: {means_angles["optimal_angle"]:.1f}° (simplex), 0° (alignment)'
-            else:
-                title = f'Neural Collapse at Step {snapshot.epoch}'
-        ax.set_title(title, fontsize=13, fontweight='bold', pad=20)
-        
-        # Add legend with better positioning
-        ax.legend(loc='upper left', fontsize=11, framealpha=0.9, 
-                 bbox_to_anchor=(0.02, 0.98))
-        
-        # Set viewing angle
-        ax.view_init(elev=elevation, azim=azimuth)
-        
-        # Fixed axis limits based on unit sphere (since everything is normalized)
-        # ETF vertices are unit-normalized, so use 1.2 as consistent scale
-        if axis_limit is not None:
-            scale = axis_limit
-        else:
-            scale = 1.5  # Fixed scale for unit-normalized vectors
-        
-        ax.set_xlim(-scale, scale)
-        ax.set_ylim(-scale, scale)
-        ax.set_zlim(-scale, scale)
-        
-        # Grid styling
-        ax.grid(True, alpha=0.3)
-        ax.xaxis.pane.fill = False
-        ax.yaxis.pane.fill = False
-        ax.zaxis.pane.fill = False
-        
-        plt.tight_layout()
-        
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
-            plt.close()  # Close figure to save memory
-        else:
-            plt.show()
-    
-    def visualize_neural_collapse_2d(
-        self,
-        snapshot: NeuralCollapseSnapshot,
-        selected_classes: Optional[List[int]] = None,
-        samples_per_class: int = 50,
-        figsize: Tuple[int, int] = (12, 10),
-        save_path: Optional[Path] = None,
-        title: Optional[str] = None,
-        axis_limit: Optional[float] = None
-    ):
-        """
-        Create 2D visualization of Neural Collapse (easier to interpret angles).
-        
-        For 3-class problems, the optimal configuration has classes separated by 
-        exactly 120° angles, which is much easier to see and measure in 2D.
-        
-        This uses the SAME SVD-based projection as the 3D version (first 2 components),
-        ensuring consistency between visualizations. All vectors are normalized to
-        unit length to clearly show angular relationships.
-        
-        Args:
-            snapshot: Network state to visualize
-            selected_classes: Which classes to visualize (None = all, max 3 for clarity)
-            samples_per_class: Number of feature samples to show per class
-            figsize: Figure size (width, height)
-            save_path: Path to save figure (if provided)
-            title: Custom title (default: based on epoch)
-            axis_limit: Fixed axis limit for consistent comparison (default: 1.5 for unit vectors)
-        """
-        # Select classes to visualize
-        if selected_classes is None:
-            selected_classes = list(range(min(3, snapshot.num_classes)))
-        
-        n_vis_classes = len(selected_classes)
-        
-        # Convert selected_classes to array for JAX indexing
-        selected_classes_array = jnp.array(selected_classes)
-        
-        # Filter data for selected classes
-        mask = jnp.isin(snapshot.labels, selected_classes_array)
-        filtered_features = snapshot.features[mask]
-        filtered_labels = snapshot.labels[mask]
-        filtered_means = snapshot.class_means[selected_classes_array]
-        filtered_classifiers = snapshot.classifiers[selected_classes_array]
-        filtered_biases = snapshot.biases[selected_classes_array]
-        
-        # Sample features for visualization
-        sampled_features = []
-        sampled_labels = []
-        for i, c in enumerate(selected_classes):
-            class_mask = filtered_labels == c
-            class_features = filtered_features[class_mask]
-            
-            n_samples = min(samples_per_class, len(class_features))
-            if n_samples > 0:
-                indices = np.random.choice(len(class_features), n_samples, replace=False)
-                sampled_features.append(class_features[indices])
-                sampled_labels.append(np.full(n_samples, i))
-        
-        if sampled_features:
-            sampled_features = jnp.concatenate(sampled_features, axis=0)
-            sampled_labels = jnp.concatenate(sampled_labels, axis=0)
-        else:
-            sampled_features = jnp.array([]).reshape(0, snapshot.features.shape[1])
-            sampled_labels = jnp.array([])
-        
-        # Project to 2D using SAME SVD method as 3D (target_dim=2, with normalization)
-        if len(sampled_features) > 0:
-            proj_features, proj_means, proj_classifiers, etf_2d, basis = self.project_to_subspace(
-                sampled_features, filtered_means, filtered_classifiers, target_dim=2, normalize=True
-            )
-        else:
-            _, proj_means, proj_classifiers, etf_2d, basis = self.project_to_subspace(
-                filtered_features[:1] if len(filtered_features) > 0 else jnp.zeros((1, snapshot.feature_dim)),
-                filtered_means, filtered_classifiers, target_dim=2, normalize=True
-            )
-            proj_features = jnp.array([]).reshape(0, 2)
-        
-        # Project biases (same method as 3D)
-        bias_vectors = []
-        for i in range(n_vis_classes):
-            # Bias as negative classifier direction scaled by magnitude
-            bias_vector = -filtered_classifiers[i] * jnp.abs(filtered_biases[i])
-            bias_vectors.append(bias_vector)
-        bias_vectors = jnp.stack(bias_vectors)
-        
-        proj_biases = bias_vectors @ basis
-        # Normalize biases
-        bias_norms = jnp.linalg.norm(proj_biases, axis=1, keepdims=True)
-        proj_biases = proj_biases / (bias_norms + 1e-8)
-        
-        # ETF is now FIXED and properly computed in 2D space
-        
-        # Create 2D plot
-        fig, ax = plt.subplots(figsize=figsize, facecolor='white')
-        
-        # Define colors (same as 3D version)
-        blue_shades = [(0.2, 0.4 + 0.2*i/n_vis_classes, 0.8) for i in range(n_vis_classes)]
-        red_shades = [(0.8, 0.2 + 0.3*i/n_vis_classes, 0.2) for i in range(n_vis_classes)]
-        green_shades = [(0.2 + 0.3*i/n_vis_classes, 0.7, 0.2) for i in range(n_vis_classes)]
-        orange_shades = [(1.0, 0.5 + 0.3*i/n_vis_classes, 0.1) for i in range(n_vis_classes)]
-        
-        # 1. Plot Simplex ETF (green circles) - FIXED theoretical target
-        for i in range(n_vis_classes):
-            ax.scatter(
-                [etf_2d[i, 0]], [etf_2d[i, 1]],
-                c=[green_shades[i]], s=300, alpha=0.7, marker='o',
-                edgecolors='darkgreen', linewidths=2,
-                label='Simplex ETF' if i == 0 else None,
-                zorder=10
-            )
-        
-        # 2. Plot individual features (small blue dots by class)
-        if len(proj_features) > 0:
-            for i in range(n_vis_classes):
-                class_mask = sampled_labels == i
-                if jnp.sum(class_mask) > 0:
-                    ax.scatter(
-                        proj_features[class_mask, 0], proj_features[class_mask, 1],
-                        c=[blue_shades[i]], s=20, alpha=0.6, marker='.',
-                        label='Features' if i == 0 else None,
-                        zorder=3
-                    )
-        
-        # 3. Plot class means (blue circles with sticks from origin)
-        for i in range(n_vis_classes):
-            # Circle for mean
-            ax.scatter(
-                [proj_means[i, 0]], [proj_means[i, 1]],
-                c=[blue_shades[i]], s=200, alpha=0.9, marker='o',
-                edgecolors='darkblue', linewidths=2,
-                label='Class Means' if i == 0 else None,
-                zorder=8
-            )
-            
-            # Stick from origin to mean
-            ax.plot(
-                [0, proj_means[i, 0]], [0, proj_means[i, 1]],
-                color=blue_shades[i], linewidth=3, alpha=0.8, zorder=7
-            )
-        
-        # 4. Plot classifiers (red triangles with sticks from origin)
-        for i in range(n_vis_classes):
-            # Triangle for classifier
-            ax.scatter(
-                [proj_classifiers[i, 0]], [proj_classifiers[i, 1]],
-                c=[red_shades[i]], s=200, alpha=0.9, marker='^',
-                edgecolors='darkred', linewidths=2,
-                label='Classifiers' if i == 0 else None,
-                zorder=8
-            )
-            
-            # Stick from origin to classifier
-            ax.plot(
-                [0, proj_classifiers[i, 0]], [0, proj_classifiers[i, 1]],
-                color=red_shades[i], linewidth=3, alpha=0.8, zorder=7
-            )
-        
-        # 5. Plot bias vectors (orange squares with normalized directions)
-        for i in range(n_vis_classes):
-            ax.scatter(
-                [proj_biases[i, 0]], [proj_biases[i, 1]],
-                c=[orange_shades[i]], s=150, alpha=0.8, marker='s',
-                edgecolors='darkorange', linewidths=2,
-                label='Biases (anti-aligned)' if i == 0 else None,
-                zorder=6
-            )
-            
-            # Stick from origin to bias (dashed line)
-            ax.plot(
-                [0, proj_biases[i, 0]], [0, proj_biases[i, 1]],
-                color=orange_shades[i], linewidth=2, alpha=0.7, linestyle='--', zorder=5
-            )
-        
-        # Add origin marker
-        ax.scatter([0], [0], c='black', s=100, marker='x', linewidths=3, zorder=9)
-        
-        # Compute TRUE angles in original feature space (all components)
-        all_angles = self.compute_all_angles_in_original_space(snapshot)
-        
-        if n_vis_classes >= 2:
-            # Extract angles for all components
-            means_angles = all_angles['class_means']
-            classifiers_angles = all_angles['classifiers']
-            biases_angles = all_angles['biases']
-            alignment_angles = all_angles['mean_classifier_alignment']
-        
-        # Set title with comprehensive TRUE angle information
-        if title is None:
-            if n_vis_classes >= 2:
-                title = f'Neural Collapse (2D View) - Step {snapshot.epoch}\n'
-                title += f'TRUE Angles in R^{self.feature_dim}: '
-                title += f'Means: {means_angles["mean_angle"]:.1f}° | '
-                title += f'Classifiers: {classifiers_angles["mean_angle"]:.1f}° | '
-                title += f'Biases: {biases_angles["mean_angle"]:.1f}°\n'
-                title += f'Mean-Classifier Alignment: {alignment_angles["mean_angle"]:.1f}° | '
-                title += f'Target: {means_angles["optimal_angle"]:.1f}° (simplex), 0° (alignment)\n'
-                title += '⚠️ 2D view angles are projection artifacts - TRUE angles shown above'
-            else:
-                title = f'Neural Collapse (2D View) - Step {snapshot.epoch}'
-        ax.set_title(title, fontsize=12, fontweight='bold', pad=20)
-        
-        # Set axis properties with FIXED scale (since vectors are normalized)
-        if axis_limit is not None:
-            scale = axis_limit
-        else:
-            scale = 1.5  # Fixed scale for unit-normalized vectors (same as 3D)
-        
-        ax.set_xlim(-scale, scale)
-        ax.set_ylim(-scale, scale)
-        
-        # Ensure equal aspect ratio for accurate angle visualization (CRITICAL!)
-        ax.set_aspect('equal')
-        
-        # Grid and styling
-        ax.grid(True, alpha=0.3)
-        ax.axhline(y=0, color='k', linewidth=0.5, alpha=0.5)
-        ax.axvline(x=0, color='k', linewidth=0.5, alpha=0.5)
-        
-        # Legend
-        ax.legend(loc='upper right', fontsize=10, framealpha=0.9)
-        
-        # Labels
-        ax.set_xlabel('Principal Component 1', fontsize=12)
-        ax.set_ylabel('Principal Component 2', fontsize=12)
-        
-        plt.tight_layout()
-        
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
-            plt.close()  # Close figure to save memory
-        else:
-            plt.show()
-    
-    def create_temporal_visualization(
-        self,
-        epochs_to_visualize: Optional[List[int]] = None,
-        selected_classes: Optional[List[int]] = None,
-        figsize: Tuple[int, int] = (20, 15),
-        save_path: Optional[Path] = None
-    ):
-        """
-        Create a temporal visualization showing Neural Collapse evolution.
-        
-        Similar to Figure 1 in the paper, showing multiple epochs in a grid.
-        
-        Args:
-            epochs_to_visualize: List of epoch numbers to visualize
-            selected_classes: Which classes to show
-            figsize: Figure size
-            save_path: Path to save figure
-        """
-        if not self.snapshots:
-            raise ValueError("No snapshots available. Run training with snapshot capture first.")
-        
-        # Select snapshots
-        if epochs_to_visualize is None:
-            # Select evenly spaced snapshots
-            n_snapshots = min(4, len(self.snapshots))
-            indices = np.linspace(0, len(self.snapshots) - 1, n_snapshots, dtype=int)
-            selected_snapshots = [self.snapshots[i] for i in indices]
-        else:
-            selected_snapshots = [
-                s for s in self.snapshots if s.epoch in epochs_to_visualize
-            ]
-        
-        n_snapshots = len(selected_snapshots)
-        
-        # Create grid of subplots
-        fig = plt.figure(figsize=figsize)
-        
-        for idx, snapshot in enumerate(selected_snapshots):
-            ax = fig.add_subplot(2, 2, idx + 1, projection='3d')
-            
-            # This is a simplified version - you would call the visualization
-            # logic here for each snapshot
-            # For now, just show the structure
-            
-        plt.tight_layout()
-        
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            print(f"Saved temporal visualization to {save_path}")
-        
-        plt.show()
-    
-    def save_snapshots(self, filepath: Path):
-        """Save all snapshots to disk."""
-        with open(filepath, 'wb') as f:
-            pickle.dump(self.snapshots, f)
-        print(f"Saved {len(self.snapshots)} snapshots to {filepath}")
-    
-    def load_snapshots(self, filepath: Path):
-        """Load snapshots from disk."""
-        with open(filepath, 'rb') as f:
-            self.snapshots = pickle.load(f)
-        print(f"Loaded {len(self.snapshots)} snapshots from {filepath}")
+        logging.info(f"Skipping 2D visualization for epoch {snapshot.epoch} (simplified NC version)")
 
 
-def create_feature_extractor_model(base_model, params):
+# =============================================================================
+# PLOTTING FUNCTIONS
+# =============================================================================
+
+def plot_classifier_mean_norms(snapshots: List[NeuralCollapseSnapshot], output_dir: Path):
     """
-    Create a feature extractor from a trained model.
+    Sanity check plot: ||W_c - μ_c|| across classes and epochs.
     
-    This function wraps a model to expose intermediate features.
+    In Neural Collapse terminal phase, classifier rows W_c should align with
+    class means μ_c, so this norm should collapse toward 0.
     
     Args:
-        base_model: Original model (init_fn, apply_fn) tuple
-        params: Model parameters
-        
-    Returns:
-        Function that returns both predictions and features
+        snapshots: List of NeuralCollapseSnapshot objects from training
+        output_dir: Directory to save plot
     """
-    init_fn, apply_fn = base_model
-    
-    def feature_apply_fn(params, x):
-        """Apply function that returns features and predictions."""
-        # This is model-specific and needs to be implemented
-        # based on the architecture
-        raise NotImplementedError(
-            "Feature extraction needs model-specific implementation"
-        )
-    
-    return feature_apply_fn
-
-
-def create_video_from_images(
-    image_dir: Path,
-    output_path: Path,
-    pattern: str = "nc_viz_step_*.png",
-    fps: float = 2.0,
-    sort_key=None
-) -> None:
-    """
-    Create a video from a sequence of images.
-    
-    Args:
-        image_dir: Directory containing the images
-        output_path: Path for the output video file
-        pattern: Glob pattern to match image files (default: "nc_viz_step_*.png")
-        fps: Frames per second (default: 2.0 for 0.5 seconds per frame)
-        sort_key: Optional function to sort image files (default: sorts by filename)
-    
-    Example:
-        create_video_from_images(
-            Path("outputs/experiment/2d-snapshots"),
-            Path("outputs/experiment/nc_evolution_2d.mp4"),
-            fps=2.0  # 0.5 seconds per frame
-        )
-    """
-    # Find all matching images
-    image_files = sorted(image_dir.glob(pattern), key=sort_key if sort_key else lambda x: x.name)
-    
-    if not image_files:
-        logging.warning(f"No images found matching pattern '{pattern}' in {image_dir}")
+    if not snapshots:
+        print("No snapshots to plot")
         return
     
-    logging.info(f"Creating video from {len(image_files)} images...")
-    logging.info(f"  FPS: {fps} ({1.0/fps:.2f} seconds per frame)")
-    logging.info(f"  Output: {output_path}")
+    output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Try to create MP4 video with ffmpeg backend
-    try:
-        # Try using ffmpeg plugin
-        with imageio.get_writer(output_path, fps=fps, codec='libx264', quality=8) as writer:
-            for i, img_file in enumerate(image_files):
-                if (i + 1) % 50 == 0:
-                    logging.info(f"  Processing frame {i + 1}/{len(image_files)}")
-                
-                image = imageio.imread(img_file)
-                writer.append_data(image)
+    # Collect ||W_c - μ_c|| for each epoch and class
+    epochs = []
+    norms_by_class = {}
+    
+    num_classes = snapshots[0].num_classes
+    for c in range(num_classes):
+        norms_by_class[c] = []
+    
+    for snapshot in snapshots:
+        epochs.append(snapshot.epoch)
+        classifiers = snapshot.classifiers  # (C, p)
+        class_means = snapshot.class_means  # (C, p)
         
-        logging.info(f"Video created successfully: {output_path}")
-        logging.info(f"  Duration: {len(image_files) / fps:.2f} seconds")
-        
-    except (ImportError, ValueError, RuntimeError) as e:
-        # Fallback: Create GIF instead
-        logging.warning(f"Could not create MP4 video: {e}")
-        logging.info("Falling back to GIF format...")
-        
-        gif_path = output_path.with_suffix('.gif')
-        try:
-            with imageio.get_writer(gif_path, mode='I', fps=fps, loop=0) as writer:
-                for i, img_file in enumerate(image_files):
-                    if (i + 1) % 50 == 0:
-                        logging.info(f"  Processing frame {i + 1}/{len(image_files)}")
-                    
-                    image = imageio.imread(img_file)
-                    writer.append_data(image)
-            
-            logging.info(f"GIF created successfully: {gif_path}")
-            logging.info(f"  Duration: {len(image_files) / fps:.2f} seconds")
-            logging.warning(f"NOTE: To create MP4 videos, install ffmpeg: pip install imageio[ffmpeg]")
-            
-        except Exception as gif_error:
-            logging.error(f"Failed to create both MP4 and GIF: {gif_error}")
-            logging.error(f"Video creation skipped. Individual frames are still available in {image_dir}")
+        for c in range(num_classes):
+            diff = classifiers[c] - class_means[c]  # (p,)
+            norm = float(jnp.linalg.norm(diff))
+            norms_by_class[c].append(norm)
+    
+    # Plot
+    fig, ax = plt.subplots(figsize=(12, 6))
+    
+    # Use different colors for each class
+    colors = plt.cm.tab10(jnp.linspace(0, 1, num_classes))
+    
+    for c in range(num_classes):
+        ax.plot(epochs, norms_by_class[c], 'o-', linewidth=2, markersize=5,
+                color=colors[c], label=f'Class {c}')
+    
+    ax.set_xlabel('Epoch', fontsize=12, fontweight='bold')
+    ax.set_ylabel('||W_c - μ_c||', fontsize=12, fontweight='bold')
+    ax.set_title('Sanity Check: Classifier-Mean Alignment\nNC3 requires these norms to collapse → 0',
+                 fontsize=13, fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    ax.axhline(y=0, color='red', linestyle='--', alpha=0.5, linewidth=1.5, label='Target: 0')
+    ax.legend(fontsize=10, ncol=2, loc='upper right')
+    ax.set_yscale('log')  # Log scale to see collapse clearly
+    
+    save_path = output_dir / 'nc_sanity_check_classifier_mean_norms.png'
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"✅ Saved classifier-mean alignment sanity check to {save_path}")
+    plt.close()
+
+def plot_nc_metrics(metrics_history: List[Tuple[int, dict]], output_dir: Path, log_scale: bool = True, step_100_acc: Optional[int] = None, tpt_threshold: float = 1.0):
+    """
+    Plot Neural Collapse metrics evolution over training.
+    
+    Args:
+        metrics_history: List of (epoch, metrics_dict) tuples
+        output_dir: Directory to save plots
+        log_scale: Use log scale for y-axis where appropriate
+        step_100_acc: If provided, add vertical line at step where TPT accuracy was reached
+        tpt_threshold: TPT accuracy threshold used (for label, e.g., 1.0 = 100%, 0.99 = 99%)
+    """
+    if not metrics_history:
+        print("No metrics to plot")
+        return
+    
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    epochs = [m[0] for m in metrics_history]
+    # Fig 2: Equinorm (blue = means, orange = classifiers)
+    nc2_cv_means = [m[1]['nc2_equinorm_cv_means'] for m in metrics_history]
+    nc2_cv_classifiers = [m[1]['nc2_equinorm_cv_classifiers'] for m in metrics_history]
+    # Fig 3: Equiangularity Std (blue = means, orange = classifiers)
+    nc2_std_means = [m[1]['nc2_equiangular_std_means'] for m in metrics_history]
+    nc2_std_classifiers = [m[1]['nc2_equiangular_std_classifiers'] for m in metrics_history]
+    # Fig 4: Equiangularity Mean (blue = means, orange = classifiers)
+    nc2_mean_means = [m[1]['nc2_equiangular_mean_means'] for m in metrics_history]
+    nc2_mean_classifiers = [m[1]['nc2_equiangular_mean_classifiers'] for m in metrics_history]
+    nc2_target = metrics_history[0][1]['nc2_equiangular_target']
+    # Fig 5: Self-Duality
+    nc3 = [m[1]['nc3_self_duality'] for m in metrics_history]
+    # Fig 6: Variability Collapse
+    nc1 = [m[1]['nc1_variability'] for m in metrics_history]
+    # Fig 7: NCC Mismatch (if available)
+    nc4 = [m[1].get('nc7_ncc_mismatch', None) for m in metrics_history]  # Use old key for compatibility
+    has_nc4 = all(v is not None for v in nc4)
+    
+    # Create figure with 2x3 subplots
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    
+    # Figure 2: NC2 - Equinorm (CV) - BOTH means and classifiers
+    ax = axes[0, 0]
+    ax.plot(epochs, nc2_cv_means, 'o-', linewidth=2, markersize=6, color='#2E86AB', label='Class-means')
+    ax.plot(epochs, nc2_cv_classifiers, 's-', linewidth=2, markersize=6, color='#F18F01', label='Classifiers')
+    # Linear scale for better visibility near 0
+    ax.set_xlabel('Epoch', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Coefficient of Variation', fontsize=12, fontweight='bold')
+    ax.set_title('Figure 2: NC2 - Equinorm\nStd(||μ_c - μ_G||) / Avg(||μ_c - μ_G||)', 
+                 fontsize=13, fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    ax.axhline(y=0, color='red', linestyle='--', alpha=0.5, linewidth=1.5, label='Target: 0')
+    # Set y-axis limits: fixed range -0.02 to 0.2
+    ax.set_ylim(bottom=-0.02, top=0.2)
+    ax.legend(fontsize=10)
+    
+    # Figure 3: NC2 - Equiangularity (Std) - BOTH means and classifiers
+    ax = axes[0, 1]
+    ax.plot(epochs, nc2_std_means, 'o-', linewidth=2, markersize=6, color='#2E86AB', label='Class-means')
+    ax.plot(epochs, nc2_std_classifiers, 's-', linewidth=2, markersize=6, color='#F18F01', label='Classifiers')
+    # Linear scale for better visibility near 0
+    ax.set_xlabel('Epoch', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Std of Cosines', fontsize=12, fontweight='bold')
+    ax.set_title('Figure 3: NC2 - Equiangularity (Std)\nStd(cos(c,c\'))', 
+                 fontsize=13, fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    ax.axhline(y=0, color='red', linestyle='--', alpha=0.5, linewidth=1.5, label='Target: 0')
+    # Set y-axis limits: fixed range -0.02 to 0.6
+    ax.set_ylim(bottom=-0.02, top=0.6)
+    ax.legend(fontsize=10)
+    
+    # Figure 4: NC2 - Equiangularity (Mean) - BOTH means and classifiers
+    ax = axes[0, 2]
+    ax.plot(epochs, nc2_mean_means, 'o-', linewidth=2, markersize=6, color='#2E86AB', label='Class-means')
+    ax.plot(epochs, nc2_mean_classifiers, 's-', linewidth=2, markersize=6, color='#F18F01', label='Classifiers')
+    ax.set_xlabel('Epoch', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Avg |cos + 1/(C-1)|', fontsize=12, fontweight='bold')
+    ax.set_title(f'Figure 4: NC2 - Equiangularity (Mean)\nAvg|cos(c,c\') + 1/(C-1)|', 
+                 fontsize=13, fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    ax.axhline(y=0, color='red', linestyle='--', alpha=0.5, linewidth=1.5, 
+               label=f'Target: 0')
+    # Set y-axis limits: fixed range -0.02 to 0.6
+    ax.set_ylim(bottom=-0.02, top=0.6)
+    ax.legend(fontsize=10)
+    
+    # Figure 5: NC3 - Self-Duality
+    ax = axes[1, 0]
+    ax.plot(epochs, nc3, 'o-', linewidth=2, markersize=6, color='#D62246')
+    # Linear scale for better visibility near 0
+    ax.set_xlabel('Epoch', fontsize=12, fontweight='bold')
+    ax.set_ylabel('NC3 Metric', fontsize=12, fontweight='bold')
+    ax.set_title('Figure 5: NC3 - Self-Duality\n||Ŵ^T - M̂||_F', 
+                 fontsize=13, fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    ax.axhline(y=0, color='red', linestyle='--', alpha=0.5, linewidth=1.5, label='Target: 0')
+    # Set y-axis limits: fixed range -0.02 to 1.5
+    ax.set_ylim(bottom=-0.02, top=1.5)
+    ax.legend()
+    
+    # Figure 6: NC1 - Variability Collapse
+    ax = axes[1, 1]
+    ax.plot(epochs, nc1, 'o-', linewidth=2, markersize=6, color='#2E86AB', label='Within-Class Variation')
+    # Always use log scale for NC1 to see collapse clearly
+    ax.set_yscale('log')
+    ax.set_xlabel('Epoch', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Tr{W @ B^†} / C (log scale)', fontsize=12, fontweight='bold')
+    ax.set_title('Figure 6: NC1 - Variability Collapse\nTr{W @ B^†} / C', 
+                 fontsize=13, fontweight='bold')
+    ax.grid(True, alpha=0.3, which='both')
+    # Set y-axis limits: fixed log range 20 to 45
+    ax.set_ylim(bottom=20, top=45)
+    ax.legend()
+    
+    # Figure 7: NC4 - Nearest Class-Center Mismatch (if available)
+    ax = axes[1, 2]
+    if has_nc4:
+        ax.plot(epochs, nc4, 'o-', linewidth=2, markersize=6, color='#A23B72')
+        ax.set_xlabel('Epoch', fontsize=12, fontweight='bold')
+        ax.set_ylabel('Proportion of Disagreements', fontsize=12, fontweight='bold')
+        ax.set_title('Figure 7: Classifier → NCC\nProportion where Classifier ≠ arg min||h-μ_c||', 
+                     fontsize=13, fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        ax.axhline(y=0, color='red', linestyle='--', alpha=0.5, linewidth=1.5, label='Target: 0')
+        # Set y-axis limits: fixed range -0.02 to 1
+        ax.set_ylim(bottom=-0.02, top=1)
+        ax.legend()
+    else:
+        # Hide subplot if NC4 not available
+        ax.axis('off')
+        ax.text(0.5, 0.5, 'NC4: Nearest Class-Center\n(requires test data)', 
+                ha='center', va='center', fontsize=11, color='gray')
+    
+    # Add vertical line at TPT accuracy threshold step (Terminal Phase Training)
+    if step_100_acc is not None:
+        tpt_label = f'{tpt_threshold*100:.0f}% Train Acc' if tpt_threshold < 1.0 else '100% Train Acc'
+        for ax in axes.flat:
+            if ax.axison:  # Only add to active subplots
+                ax.axvline(x=step_100_acc, color='black', linestyle='-', alpha=0.8, linewidth=2)
+        # Add text annotation to the first subplot
+        axes[0, 0].text(step_100_acc, axes[0, 0].get_ylim()[1] * 0.9, 
+                       tpt_label, rotation=90, verticalalignment='top',
+                       fontsize=10, color='black', fontweight='bold')
+    
+    plt.suptitle('Neural Collapse Metrics Evolution', fontsize=16, fontweight='bold', y=0.995)
+    plt.tight_layout()
+    
+    save_path = output_dir / 'nc_metrics_paper_style.png'
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"✅ Saved Neural Collapse metrics plot to {save_path}")
+    plt.close()

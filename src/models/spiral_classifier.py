@@ -42,20 +42,23 @@ except:
 
 class SpiralClassifier:
     """
-    A neural network classifier for spiral datasets with dynamic batch composition.
+    A neural network classifier for spiral datasets following the Neural Collapse paper.
     
-    This class implements a multi-layer perceptron that is trained on spiral data
-    using periodically varying class focus. The training process alternates between
-    emphasizing different classes over time, allowing the study of how neural networks
-    adapt their internal representations.
+    Architecture strictly follows Papyan et al. (2020) "Prevalence of Neural Collapse":
+    - Feature Extractor h(x): Multiple Dense → BatchNorm → ReLU blocks
+    - Linear Classifier: W·h(x) + b
+    
+    This separation allows studying Neural Collapse in the Terminal Phase of Training (TPT).
     
     Attributes:
         points_per_class (int): Number of data points per class in the spiral dataset
         num_classes (int): Number of spiral classes (typically 3)
-        nn_width (int): Width of the hidden layer
+        nn_width (int): Width of the hidden layers (feature dimension p)
+        num_hidden_layers (int): Number of hidden layers in feature extractor
         learning_rate (float): Learning rate for the optimizer
         period_length (int): Period length T for the dynamic class focus
-        model: JAX/Stax neural network model
+        encoder: Feature extractor h: R^d → R^p
+        classifier: Linear classifier W·h(x) + b
         optimizer: Optax optimizer instance
         last_params: Final trained parameters
         weights_history (List): History of weight vectors during training
@@ -69,6 +72,7 @@ class SpiralClassifier:
         points_per_class: int = 100,
         num_classes: int = 3,
         nn_width: int = 100,
+        num_hidden_layers: int = 1,
         learning_rate: float = 0.01,
         optimizer_type: str = "adam",
         period_length: int = 5000,
@@ -78,34 +82,58 @@ class SpiralClassifier:
         track_weight_diff: bool = False,
         weight_diff_step_interval: int = 100,
         real_time_visualization: bool = False,
-        vis_step_interval: int = 100
+        vis_step_interval: int = 100,
+        use_batchnorm: bool = True,
+        use_bias: bool = True,
+        # Optimizer parameters
+        momentum: float = 0.9,
+        beta1: float = 0.9,
+        beta2: float = 0.999,
+        eps: float = 1e-8,
+        # Initialization parameters
+        weight_init_scale: float = 1.0
     ):
         """
-        Initialize the SpiralClassifier.
+        Initialize the SpiralClassifier (Neural Collapse compliant).
         
         Args:
             points_per_class: Number of data points per class
             num_classes: Number of spiral classes (default: 3)
-            nn_width: Width of the hidden layer
+            nn_width: Width of the hidden layers (feature dimension p)
+            num_hidden_layers: Number of hidden layers in feature extractor (default: 1)
             learning_rate: Learning rate for optimization
             optimizer_type: Type of optimizer ("adam" or "sgd")
             period_length: Period T for dynamic class focus
-            l2_reg: L2 regularization coefficient
+            l2_reg: L2 regularization (weight decay, paper uses 5e-4)
             random_seed: Random seed for reproducibility
             label: Label for experiment identification
             track_weight_diff: Whether to track weight differences over time
             weight_diff_step_interval: Interval for weight difference tracking
             real_time_visualization: Whether to show real-time visualizations
             vis_step_interval: Interval for visualizations
+            use_batchnorm: Whether to include BatchNorm layers (default: True)
+            use_bias: Whether to include bias terms in Dense layers (default: True)
         """
         # Basic configuration
         self.points_per_class = points_per_class
         self.num_classes = num_classes
         self.nn_width = nn_width
-        self.learning_rate = learning_rate
+        self.num_hidden_layers = num_hidden_layers
+        self.learning_rate = float(learning_rate)
         self.period_length = period_length
-        self.l2_reg = l2_reg
+        self.l2_reg = float(l2_reg)  # Ensure it's a float, not a string
         self.label = label
+        self.use_batchnorm = use_batchnorm
+        self.use_bias = use_bias
+        
+        # Optimizer parameters
+        self.momentum = momentum
+        self.beta1 = beta1
+        self.beta2 = beta2
+        self.eps = eps
+        
+        # Initialization parameters
+        self.weight_init_scale = weight_init_scale
         
         # Tracking configuration
         self.track_weight_diff = track_weight_diff
@@ -117,11 +145,25 @@ class SpiralClassifier:
         self.model = self._create_model()
         
         if optimizer_type.lower() == "adam":
-            self.optimizer = optax.adam(learning_rate)
+            self.optimizer = optax.adam(
+                learning_rate=learning_rate,
+                b1=self.beta1,
+                b2=self.beta2,
+                eps=self.eps
+            )
         elif optimizer_type.lower() == "sgd":
-            self.optimizer = optax.sgd(learning_rate)
+            self.optimizer = optax.sgd(
+                learning_rate=learning_rate,
+                momentum=self.momentum
+            )
+        elif optimizer_type.lower() == "rmsprop":
+            self.optimizer = optax.rmsprop(
+                learning_rate=learning_rate,
+                decay=self.beta2,  # Use beta2 as decay rate for RMSprop
+                eps=self.eps
+            )
         else:
-            raise ValueError(f"Unknown optimizer type: {optimizer_type}")
+            raise ValueError(f"Unknown optimizer type: {optimizer_type}. Supported: adam, sgd, rmsprop")
         
         # Initialize random key
         self.key = random.PRNGKey(random_seed)
@@ -161,16 +203,35 @@ class SpiralClassifier:
     
     def _create_model(self) -> Tuple:
         """
-        Create the neural network model architecture.
+        Create Neural Collapse compliant architecture.
+        
+        Architecture follows Papyan et al. (2020):
+        - Feature Extractor h(x): Dense → [BatchNorm] → ReLU (repeated)
+        - Linear Classifier: W·h(x) + b
         
         Returns:
             A tuple containing the initialization and application functions
         """
-        return stax.serial(
-            stax.Dense(self.nn_width), 
-            stax.Relu,
-            stax.Dense(self.num_classes)
-        )
+        # Build feature extractor h(x) with stacked Dense → [BatchNorm] → ReLU blocks
+        layers = []
+        
+        # First layer: Input (2D) → nn_width (always use bias for feature extractor)
+        layers.append(stax.Dense(self.nn_width, use_bias=True))
+        if self.use_batchnorm:
+            layers.append(stax.BatchNorm(axis=(0,)))  # Prevents weight explosion
+        layers.append(stax.Relu)
+        
+        # Hidden layers: nn_width → nn_width (Dense → [BatchNorm] → ReLU, always use bias)
+        for _ in range(self.num_hidden_layers - 1):
+            layers.append(stax.Dense(self.nn_width, use_bias=True))
+            if self.use_batchnorm:
+                layers.append(stax.BatchNorm(axis=(0,)))  # Prevents weight explosion
+            layers.append(stax.Relu)
+        
+        # Final linear classifier: W·h(x) + b (configurable bias for Neural Collapse analysis)
+        layers.append(stax.Dense(self.num_classes, use_bias=self.use_bias))
+        
+        return stax.serial(*layers)
     
     def initialize_params(self, random_seed: Optional[int] = None) -> Any:
         """
@@ -186,21 +247,91 @@ class SpiralClassifier:
         _, params = self.model[0](random.PRNGKey(seed), (-1, 2))
         return params
     
+    def get_features(self, params: Any, X: jnp.ndarray, is_training: bool = False) -> jnp.ndarray:
+        """
+        Extract last-layer features h(x) from the feature extractor.
+        
+        This method extracts features from the penultimate layer (before the final
+        linear classifier), following the Neural Collapse paper's definition of h(x).
+        
+        Architecture with BatchNorm:
+            x → [Dense → BatchNorm → ReLU] × num_hidden_layers → h(x) → [Dense] → logits
+                └────────── Feature Extractor ──────────┘              └─ Classifier ─┘
+        
+        Architecture without BatchNorm:
+            x → [Dense → ReLU] × num_hidden_layers → h(x) → [Dense] → logits
+                └────────── Feature Extractor ──────────┘              └─ Classifier ─┘
+        
+        Args:
+            params: Model parameters (list of layer parameters)
+            X: Input data of shape (N, input_dim)
+            is_training: Whether in training mode (affects BatchNorm)
+            
+        Returns:
+            Features h(x) of shape (N, nn_width)
+        """
+        h = X
+        num_blocks = self.num_hidden_layers
+        
+        if self.use_batchnorm:
+            # Process each Dense → BatchNorm → ReLU block
+            # NOTE: In JAX stax params list, each LAYER creates ONE entry (even ReLU makes empty tuple):
+            #   - Dense layer = 1 entry: (W, b) tuple  
+            #   - BatchNorm layer = 1 entry: (gamma, beta, mean, var) tuple
+            #   - ReLU layer = 1 entry: () empty tuple
+            # So each block has 3 entries total (Dense + BatchNorm + ReLU)
+            for block_idx in range(num_blocks):
+                param_idx = block_idx * 3  # 3 entries per block
+                
+                # Dense layer - params[param_idx] is a tuple (W, b)
+                W, b = params[param_idx]
+                h = jnp.dot(h, W) + b
+                
+                # BatchNorm layer - params[param_idx + 1] is a tuple (gamma, beta, mean, var)
+                bn_params = params[param_idx + 1]
+                if len(bn_params) == 4:
+                    gamma, beta, running_mean, running_var = bn_params
+                    # Normalize using running statistics
+                    h = gamma * (h - running_mean) / jnp.sqrt(running_var + 1e-5) + beta
+                
+                # ReLU (creates empty tuple at param_idx + 2)
+                h = jnp.maximum(0, h)
+        else:
+            # Process each Dense → ReLU block (no BatchNorm)
+            # Each block has 2 entries: Dense + ReLU (empty tuple)
+            for block_idx in range(num_blocks):
+                param_idx = block_idx * 2  # 2 entries per block
+                
+                # Dense layer - params[param_idx] is a tuple (W, b)
+                W, b = params[param_idx]
+                h = jnp.dot(h, W) + b
+                
+                # ReLU (creates empty tuple at param_idx + 1)
+                h = jnp.maximum(0, h)
+                h = jnp.dot(h, W) + b
+                
+                # ReLU (no parameters)
+                h = jnp.maximum(0, h)
+        
+        return h
+    
     @partial(jit, static_argnums=(0,))
     def make_dataset(
         self, 
         revolutions: float = 4.0, 
-        seed: Optional[int] = None
+        seed: Optional[int] = None,
+        min_radius: float = 0.05
     ) -> Tuple[jnp.ndarray, jnp.ndarray]:
         """
         Generate a spiral dataset with multiple classes.
         
         Each class forms a spiral in 2D space with different starting angles.
-        The spirals have radius increasing from 0 to 1 and multiple revolutions.
+        The spirals have radius increasing from min_radius to 1 and multiple revolutions.
         
         Args:
             revolutions: Number of spiral revolutions (default: 4.0)
             seed: Random seed for dataset generation
+            min_radius: Minimum radius to avoid points at origin (0,0). Default 0.05.
             
         Returns:
             Tuple of (X, Y) where:
@@ -219,7 +350,8 @@ class SpiralClassifier:
             ix = slice(N * j, N * (j + 1))
             
             # Create spiral parameters
-            r = jnp.linspace(0., 1, N)  # radius from 0 to 1
+            # Start from min_radius instead of 0 to avoid points at origin (0,0)
+            r = jnp.linspace(min_radius, 1, N)  # radius from min_radius to 1
             omega = 2 * pi / C  # angular offset between classes
             theta_max = revolutions * pi  # maximum angle
             

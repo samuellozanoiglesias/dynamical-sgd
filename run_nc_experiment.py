@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 """
-Run Neural Collapse experiments with or without dynamic class focus (bumping).
+Run Neural Collapse experiments with three different bumping configurations.
 
-This script can run both experiments for comparison or just one.
+This script can run experiments with:
+  - with_bumps_TPT: Bumping continues after reaching 100% training accuracy
+  - without_bumps_TPT: Bumping stops after reaching 100% training accuracy  
+  - without_dynamics: No bumping at all (standard training)
+  - with_dynamics: Both with_bumps_TPT and without_bumps_TPT (compare TPT behavior)
+  - all: Run all three experiments for comparison
 
 Usage:
-    python run_nc_experiment.py --cluster brigit
-    python run_nc_experiment.py --cluster cuenca --mode with_dynamics
+    python run_nc_experiment.py --cluster brigit --mode all
+    python run_nc_experiment.py --cluster cuenca --mode with_bumps_TPT
+    python run_nc_experiment.py --cluster brigit --mode without_bumps_TPT
     python run_nc_experiment.py --cluster brigit --mode without_dynamics
-    python run_nc_experiment.py --cluster brigit --mode both
+    python run_nc_experiment.py --cluster brigit --mode with_dynamics
 """
 
 import argparse
@@ -33,9 +39,9 @@ def main():
     parser.add_argument(
         '--mode',
         type=str,
-        default='both',
-        choices=['with_dynamics', 'without_dynamics', 'both'],
-        help='Which experiment to run: with_dynamics (bumping), without_dynamics (standard), or both'
+        default='all',
+        choices=['with_bumps_TPT', 'without_bumps_TPT', 'without_dynamics', 'with_dynamics', 'all'],
+        help='Which experiment to run: with_bumps_TPT (bumps continue after 100%%), without_bumps_TPT (bumps stop at 100%%), without_dynamics (no bumps), with_dynamics (both TPT modes), or all (run all three)'
     )
 
     parser.add_argument(
@@ -95,25 +101,46 @@ def main():
     
     experiments = []
     
-    # Use single config file, just override enable_dynamics
-    if args.mode in ['with_dynamics', 'both']:
+    # Use single config file, just override enable_dynamics and bumps_TPT
+    if args.mode in ['with_bumps_TPT', 'with_dynamics', 'all']:
         overrides = [
             f'output.output_dir={output_base}',
             'dynamics.enable_dynamics=true',
-            'output.experiment_name=nc_with_dynamics',
+            'dynamics.bumps_TPT=true',
+            'output.experiment_name=nc_with_bumps_TPT',
             f'output.config_name={config_name}',
             f'output.experiment_timestamp={experiment_timestamp}'
         ]
         if args.seed is not None:
             overrides.append(f'training.random_seed={args.seed}')
+            overrides.append(f'data.random_seed={args.seed}')
         
         experiments.append({
-            'name': 'WITH Dynamic Class Focus (Bumping)',
+            'name': 'WITH Bumps Through Terminal Phase Training (bumps_TPT=true)',
             'config': args.config_file,
             'overrides': overrides
         })
     
-    if args.mode in ['without_dynamics', 'both']:
+    if args.mode in ['without_bumps_TPT', 'with_dynamics', 'all']:
+        overrides = [
+            f'output.output_dir={output_base}',
+            'dynamics.enable_dynamics=true',
+            'dynamics.bumps_TPT=false',
+            'output.experiment_name=nc_without_bumps_TPT',
+            f'output.config_name={config_name}',
+            f'output.experiment_timestamp={experiment_timestamp}'
+        ]
+        if args.seed is not None:
+            overrides.append(f'training.random_seed={args.seed}')
+            overrides.append(f'data.random_seed={args.seed}')
+        
+        experiments.append({
+            'name': 'WITHOUT Bumps after Terminal Phase Training (bumps_TPT=false)',
+            'config': args.config_file,
+            'overrides': overrides
+        })
+    
+    if args.mode in ['without_dynamics', 'all']:
         overrides = [
             f'output.output_dir={output_base}',
             'dynamics.enable_dynamics=false',
@@ -123,6 +150,7 @@ def main():
         ]
         if args.seed is not None:
             overrides.append(f'training.random_seed={args.seed}')
+            overrides.append(f'data.random_seed={args.seed}')
         
         experiments.append({
             'name': 'WITHOUT Dynamic Class Focus (Standard Training)',
@@ -165,9 +193,11 @@ def main():
     print()
     print("Results saved to:")
     
-    if args.mode in ['with_dynamics', 'both']:
-        print(f"  - {output_base}/nc_with_dynamics/{config_name}/experiment_{experiment_timestamp}/")
-    if args.mode in ['without_dynamics', 'both']:
+    if args.mode in ['with_bumps_TPT', 'with_dynamics', 'all']:
+        print(f"  - {output_base}/nc_with_bumps_TPT/{config_name}/experiment_{experiment_timestamp}/")
+    if args.mode in ['without_bumps_TPT', 'with_dynamics', 'all']:
+        print(f"  - {output_base}/nc_without_bumps_TPT/{config_name}/experiment_{experiment_timestamp}/")
+    if args.mode in ['without_dynamics', 'all']:
         print(f"  - {output_base}/nc_without_dynamics/{config_name}/experiment_{experiment_timestamp}/")
     
     print()

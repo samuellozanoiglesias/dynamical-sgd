@@ -28,6 +28,7 @@ class DataConfig:
     random_seed: Optional[int] = 0
     randomize_offsets: bool = False  # Generate random angular offsets for spirals
     angular_offsets: Optional[List[float]] = None  # Custom angular offsets in degrees
+    min_radius: float = 0.05  # Minimum radius to avoid points at origin (0,0)
 
 
 @dataclass
@@ -35,9 +36,11 @@ class ModelConfig:
     """Configuration for neural network model."""
     
     nn_width: int = 100
+    num_hidden_layers: int = 1  # Number of Dense → BatchNorm → ReLU blocks
     num_classes: int = 3
     activation: str = "relu"
     use_bias: bool = True
+    use_batchnorm: bool = True  # Whether to include BatchNorm layers
     weight_init_scale: float = 1.0
     random_seed: Optional[int] = 0
 
@@ -64,6 +67,8 @@ class DynamicsConfig:
     w_max: float = 70.0
     class_focus_pattern: str = "sequential"  # "sequential", "random"
     enable_dynamics: bool = True
+    bumps_TPT: bool = False  # If False, stop bumping after reaching TPT accuracy threshold
+    tpt_accuracy_threshold: float = 1.0  # Accuracy threshold for Terminal Phase Training (e.g., 0.99)
 
 
 @dataclass

@@ -1,0 +1,5 @@
+usage: run_nc_experiment.py [-h] --cluster {brigit,cuenca}
+                            [--mode {with_bumps_TPT,without_bumps_TPT,without_dynamics,with_dynamics,all}]
+                            [--config_file CONFIG_FILE]
+                            [--output_base OUTPUT_BASE] [--seed SEED]
+run_nc_experiment.py: error: argument --mode: invalid choice: 'copy.yaml' (choose from 'with_bumps_TPT', 'without_bumps_TPT', 'without_dynamics', 'with_dynamics', 'all')
