@@ -22,6 +22,7 @@ import jax.numpy as jnp
 from jax import random, jit, grad
 from jax.example_libraries import stax
 from jax.tree_util import tree_map
+from jax.nn.initializers import zeros
 import optax
 from functools import partial
 from pathlib import Path
@@ -31,6 +32,30 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 import pickle
 import imageio
+
+def DenseNoBias(out_dim, W_init=None):
+    """
+    Dense layer without bias parameter for Neural Collapse analysis.
+    
+    Args:
+        out_dim: Output dimension
+        W_init: Weight initialization function (defaults to glorot_normal)
+        
+    Returns:
+        init_fun, apply_fun: JAX stax-compatible layer functions
+    """
+    if W_init is None:
+        W_init = stax.glorot_normal()
+    
+    def init_fun(rng, input_shape):
+        k = random.split(rng)[0]
+        W = W_init(k, (input_shape[-1], out_dim))
+        return input_shape[:-1] + (out_dim,), W
+
+    def apply_fun(W, inputs, **kwargs):
+        return jnp.dot(inputs, W)
+
+    return init_fun, apply_fun
 
 # Configure JAX to use GPU if available
 try:
@@ -216,20 +241,24 @@ class SpiralClassifier:
         layers = []
         
         # First layer: Input (2D) → nn_width (always use bias for feature extractor)
-        layers.append(stax.Dense(self.nn_width, use_bias=True))
+        layers.append(stax.Dense(self.nn_width))
         if self.use_batchnorm:
             layers.append(stax.BatchNorm(axis=(0,)))  # Prevents weight explosion
         layers.append(stax.Relu)
         
         # Hidden layers: nn_width → nn_width (Dense → [BatchNorm] → ReLU, always use bias)
         for _ in range(self.num_hidden_layers - 1):
-            layers.append(stax.Dense(self.nn_width, use_bias=True))
+            layers.append(stax.Dense(self.nn_width))
             if self.use_batchnorm:
                 layers.append(stax.BatchNorm(axis=(0,)))  # Prevents weight explosion
             layers.append(stax.Relu)
         
         # Final linear classifier: W·h(x) + b (configurable bias for Neural Collapse analysis)
-        layers.append(stax.Dense(self.num_classes, use_bias=self.use_bias))
+        if self.use_bias:
+            layers.append(stax.Dense(self.num_classes))
+        else:
+            # Use custom DenseNoBias layer to completely remove bias parameter
+            layers.append(DenseNoBias(self.num_classes))
         
         return stax.serial(*layers)
     

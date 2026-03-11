@@ -191,7 +191,11 @@ def create_and_train_model(
     )
     
     # Setup metrics tracking
-    metrics_tracker = MetricsTracker(track_calibration=True)
+    metrics_tracker = MetricsTracker(
+        track_calibration=True,
+        track_per_class=True,
+        num_classes=config.data.num_classes
+    )
     
     # Validate dynamics configuration and warn about potential issues
     if config.dynamics.enable_dynamics:
@@ -327,6 +331,7 @@ def create_and_train_model(
     # Track when 100% training accuracy is reached
     step_100_acc = None  # Step at which train_acc reaches 100%
     terminal_full_training_reached = False
+    progress_bar_position = 0  # Track current progress bar position
     
     with tqdm(total=config.training.total_steps, desc="Training") as pbar:
         for t in range(config.training.total_steps):
@@ -383,15 +388,18 @@ def create_and_train_model(
                         else:
                             logging.info(f"   Stopping bumps after {tpt_threshold*100:.1f}% accuracy (bumps_TPT=false)")
                 
-                # Update progress bar with latest metrics
+                # Update progress bar with latest metrics and refresh display
                 pbar.set_postfix({
                     'Train Loss': f"{current_metrics['train_loss']:.8f}",
                     'Train Acc': f"{current_metrics['train_accuracy']:.3f}",
                     'Test Acc': f"{current_metrics['test_accuracy']:.3f}"
                 })
-            
-            # Log simple training progress
-            if t % config.training.validation_interval == 0 or t == config.training.total_steps - 1:
+                # Update progress bar to current step position
+                steps_to_update = (t + 1) - progress_bar_position
+                pbar.update(steps_to_update)
+                progress_bar_position = t + 1
+                
+                # Log simple training progress
                 logging.info(f"Step {t}: Train Loss={current_metrics['train_loss']:.6f}, "
                            f"Train Acc={current_metrics['train_accuracy']:.6f}, "
                            f"Test Loss={current_metrics['test_loss']:.6f}, "
@@ -413,8 +421,6 @@ def create_and_train_model(
                 )
                 
                 # Store NC metrics for later saving (don't log them)
-            
-            pbar.update(1)
     
     # Store final parameters
     classifier.last_params = params
@@ -431,7 +437,7 @@ def create_and_train_model(
     else:
         logging.info("Terminal Full Training (100% accuracy) was NOT reached during training")
     
-    return classifier, train_losses, train_accuracies, test_losses, test_accuracies, metric_steps, nc_analyzer, step_100_acc
+    return classifier, train_losses, train_accuracies, test_losses, test_accuracies, metric_steps, nc_analyzer, step_100_acc, metrics_tracker
 
 
 def create_visualizations(
@@ -776,18 +782,21 @@ def main():
         logging.info(f"Saved test dataset plot: {output_dir / 'test_dataset.png'}")
         
         # Train model
-        classifier, train_losses, train_accuracies, test_losses, test_accuracies, metric_steps, nc_analyzer, step_100_acc = create_and_train_model(
+        classifier, train_losses, train_accuracies, test_losses, test_accuracies, metric_steps, nc_analyzer, step_100_acc, metrics_tracker = create_and_train_model(
             config, X_train, Y_train, X_test, Y_test, output_dir
         )
         
-        # Compute per-class metrics for visualization and saving
+        # Extract per-class metrics from metrics tracker history
         all_per_class_metrics = []
-        if config.output.save_metrics:
+        if config.output.save_metrics and metrics_tracker.track_per_class:
             for i in range(len(metric_steps)):
-                # Get params at this step (use final params as approximation)
-                step_per_class = compute_per_class_metrics(
-                    classifier, classifier.last_params, X_train, Y_train, X_test, Y_test, config.data.num_classes
-                )
+                step_per_class = {}
+                for c in range(config.data.num_classes):
+                    # Extract metrics for class c at step i
+                    step_per_class[f'Train_Loss_Class_{c}'] = metrics_tracker.metrics_history[f'train_loss_class_{c}'][i]
+                    step_per_class[f'Train_Acc_Class_{c}'] = metrics_tracker.metrics_history[f'train_accuracy_class_{c}'][i]
+                    step_per_class[f'Test_Loss_Class_{c}'] = metrics_tracker.metrics_history[f'test_loss_class_{c}'][i]
+                    step_per_class[f'Test_Acc_Class_{c}'] = metrics_tracker.metrics_history[f'test_accuracy_class_{c}'][i]
                 all_per_class_metrics.append(step_per_class)
         
         # Create visualizations

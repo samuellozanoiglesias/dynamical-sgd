@@ -322,16 +322,23 @@ class MetricsTracker:
     Class for tracking multiple metrics during training.
     """
     
-    def __init__(self, track_calibration: bool = False):
+    def __init__(self, track_calibration: bool = False, track_per_class: bool = False, num_classes: Optional[int] = None):
         """
         Initialize metrics tracker.
         
         Args:
             track_calibration: Whether to track calibration metrics
+            track_per_class: Whether to track per-class accuracy and loss metrics
+            num_classes: Number of classes (required if track_per_class=True)
         """
         self.track_calibration = track_calibration
+        self.track_per_class = track_per_class
+        self.num_classes = num_classes
         self.metrics_history = {}
         self.step = 0
+        
+        if self.track_per_class and self.num_classes is None:
+            raise ValueError("num_classes must be specified when track_per_class=True")
     
     def update(
         self,
@@ -381,6 +388,49 @@ class MetricsTracker:
             current_metrics['test_accuracy'] = float(
                 classification_accuracy(model_fn, params, X_test, Y_test)
             )
+        
+        # Per-class metrics
+        if self.track_per_class and self.num_classes is not None:
+            # Compute per-class metrics using the same approach as compute_per_class_metrics
+            from jax import nn
+            
+            # Convert one-hot to class indices
+            train_labels = jnp.argmax(Y_train, axis=1)
+            test_labels = jnp.argmax(Y_test, axis=1) if Y_test is not None else None
+            
+            for c in range(self.num_classes):
+                # Training metrics for class c
+                train_mask = train_labels == c
+                if jnp.sum(train_mask) > 0:
+                    X_train_c = X_train[train_mask]
+                    Y_train_c = Y_train[train_mask]
+                    
+                    train_logits_c = model_fn(params, X_train_c)
+                    train_loss_c = float(-jnp.mean(jnp.sum(Y_train_c * nn.log_softmax(train_logits_c), axis=1)))
+                    train_acc_c = float(jnp.mean(jnp.argmax(train_logits_c, axis=1) == jnp.argmax(Y_train_c, axis=1)))
+                else:
+                    train_loss_c = 0.0
+                    train_acc_c = 0.0
+                
+                current_metrics[f'train_loss_class_{c}'] = train_loss_c
+                current_metrics[f'train_accuracy_class_{c}'] = train_acc_c
+                
+                # Test metrics for class c
+                if Y_test is not None and test_labels is not None:
+                    test_mask = test_labels == c
+                    if jnp.sum(test_mask) > 0:
+                        X_test_c = X_test[test_mask]
+                        Y_test_c = Y_test[test_mask]
+                        
+                        test_logits_c = model_fn(params, X_test_c)
+                        test_loss_c = float(-jnp.mean(jnp.sum(Y_test_c * nn.log_softmax(test_logits_c), axis=1)))
+                        test_acc_c = float(jnp.mean(jnp.argmax(test_logits_c, axis=1) == jnp.argmax(Y_test_c, axis=1)))
+                    else:
+                        test_loss_c = 0.0
+                        test_acc_c = 0.0
+                    
+                    current_metrics[f'test_loss_class_{c}'] = test_loss_c
+                    current_metrics[f'test_accuracy_class_{c}'] = test_acc_c
         
         # Parameter metrics
         current_metrics['parameter_norm'] = compute_parameter_norm(params)

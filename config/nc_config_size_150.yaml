@@ -16,7 +16,7 @@ data:
 
 # Model architecture
 model:
-  nn_width: 500  # Hidden layer width (feature dimension for NC analysis)
+  nn_width: 150  # Hidden layer width (feature dimension for NC analysis)
   num_hidden_layers: 1  # Number of Dense → BatchNorm → ReLU blocks
   activation: "relu"
   use_bias: true

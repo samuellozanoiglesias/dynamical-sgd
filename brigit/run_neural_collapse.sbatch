@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=nc_config_baseline_false
+#SBATCH --job-name=nc_config_size_500
 #SBATCH -t 30-00:00:00
 #SBATCH --partition=gpu
 #SBATCH --qos=qos_gpu_long
@@ -20,7 +20,7 @@ cd /mnt/lustre/home/samuloza/dynamical-sgd
 # CONFIGURATION
 # ============================================================================
 # Array of config files to run
-CONFIG_FILES=("nc_config_baseline_false.yaml")
+CONFIG_FILES=(nc_config_size_75.yaml nc_config_size_100.yaml nc_config_size_150.yaml nc_config_size_200.yaml nc_config_size_250.yaml)
 # CONFIG_FILES=("nc_config_baseline.yaml" "nc_config_big_nn.yaml"  "nc_config_super_big_nn.yaml" "nc_config_narrow_bump.yaml")
 
 MODE="all"  # Options: with_bumps_TPT, without_bumps_TPT, without_dynamics, with_dynamics, all

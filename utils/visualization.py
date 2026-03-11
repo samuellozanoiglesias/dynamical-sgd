@@ -321,6 +321,7 @@ def plot_training_curves_with_classes(
     ax_acc.set_xlabel('Step')
     ax_acc.set_ylabel('Accuracy')
     ax_acc.set_title('Total Accuracy')
+    ax_acc.set_ylim(-0.01, 1.01)  # Set y-axis range from -0.01 to 1.01
     
     # Add horizontal dashed lines for total accuracy
     accuracy_horizontal_lines = [0.2, 0.4, 0.6, 0.8, 1.0]
@@ -359,6 +360,7 @@ def plot_training_curves_with_classes(
         ax_acc_class.set_xlabel('Step')
         ax_acc_class.set_ylabel('Accuracy')
         ax_acc_class.set_title(f'Class {class_idx} Accuracy')
+        ax_acc_class.set_ylim(-0.01, 1.01)  # Set y-axis range from -0.01 to 1.01
         
         # Add horizontal dashed lines for class accuracy
         for acc_val in accuracy_horizontal_lines:
@@ -487,6 +489,7 @@ def plot_training_curves(
     ax2.set_xlabel('Step')
     ax2.set_ylabel('Accuracy')
     ax2.set_title('Accuracy Curves')
+    ax2.set_ylim(-0.01, 1.01)  # Set y-axis range from -0.01 to 1.01
     
     # Add horizontal dashed lines at specific accuracy values (soft/subtle)
     accuracy_horizontal_lines = [0.2, 0.4, 0.6, 0.8, 1.0]

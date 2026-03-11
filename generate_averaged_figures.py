@@ -360,6 +360,7 @@ def plot_averaged_training_curves(training_data: List[TrainingCurveData], output
     ax_acc.set_xlabel('Step')
     ax_acc.set_ylabel('Accuracy')
     ax_acc.set_title('Total Accuracy Curves')
+    ax_acc.set_ylim(-0.01, 1.01)  # Set y-axis range from -0.01 to 1.01
     
     # Add horizontal dashed lines for total accuracy
     accuracy_horizontal_lines = [0.2, 0.4, 0.6, 0.8, 1.0]
@@ -429,6 +430,7 @@ def plot_averaged_training_curves(training_data: List[TrainingCurveData], output
             ax_acc_class.set_xlabel('Step')
             ax_acc_class.set_ylabel('Accuracy')
             ax_acc_class.set_title(f'Class {class_idx} Accuracy Curves')
+            ax_acc_class.set_ylim(-0.01, 1.01)  # Set y-axis range from -0.01 to 1.01
             ax_acc_class.legend()
             
             # Add horizontal lines for accuracy
