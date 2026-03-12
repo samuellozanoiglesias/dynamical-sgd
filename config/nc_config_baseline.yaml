@@ -1,6 +1,6 @@
 # Neural Collapse Experiment Configuration
 # Used for both WITH and WITHOUT dynamic class focus (bumping) experiments
-# The enable_dynamics parameter is overridden by run_nc_experiment.py
+# The bumps_before_TPT and bumps_at_TPT parameters are overridden by run_nc_experiment.py
 
 # Data configuration
 data:
@@ -16,6 +16,7 @@ data:
 
 # Model architecture
 model:
+  input_dim: 2      # Input dimension (2D for spiral coordinates)
   nn_width: 50  # Hidden layer width (feature dimension for NC analysis)
   num_hidden_layers: 1  # Number of Dense → BatchNorm → ReLU blocks
   activation: "relu"
@@ -36,10 +37,10 @@ optimizer:
 
 # Dynamic class focus (bumping) configuration
 dynamics:
-  enable_dynamics: true  # Overridden by run_nc_experiment.py (true/false)
-  period_length: 5000    # Period T for class focus cycling
-  w_max: 70           # Maximum class weight (amplitude)
-  bumps_TPT: false    # If false, stop bumping after reaching TPT accuracy threshold
+  bumps_before_TPT: true   # Apply bumps before reaching TPT accuracy threshold
+  bumps_at_TPT: false      # Apply bumps during/after reaching TPT accuracy threshold
+  period_length: 5000      # Period T for class focus cycling
+  w_max: 70               # Maximum class weight (amplitude)
   tpt_accuracy_threshold: 1.00  # 100% accuracy triggers Terminal Phase Training
 
 # Analysis configuration

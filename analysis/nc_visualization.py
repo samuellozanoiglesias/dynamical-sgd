@@ -20,6 +20,7 @@ from matplotlib.patches import Circle
 from pathlib import Path
 from typing import Tuple, Optional, List
 import logging
+from utils.visualization import generate_class_colors
 
 
 def compute_simplex_etf(C: int, p: int) -> jnp.ndarray:
@@ -203,13 +204,31 @@ def visualize_nc_figure1(
     N, p = H.shape
     C = class_means.shape[0]
     
-    # Color scheme per object type, with intensity variations per class
-    # Green for ETF (light -> dark)
-    green_colors = ['#90EE90', '#32CD32', '#006400']  # Light green, lime green, dark green
-    # Red for classifiers (light -> dark)
-    red_colors = ['#FF6B6B', '#DC143C', '#8B0000']  # Light red, crimson, dark red
-    # Blue for class means and features (light -> dark)
-    blue_colors = ['#87CEEB', '#1E90FF', '#00008B']  # Sky blue, dodger blue, dark blue
+    # Color scheme per object type - generate colors for actual number of classes
+    # Use different base colormaps to ensure visual distinction between object types
+    import matplotlib.cm as cm
+    from matplotlib.colors import to_hex
+    
+    # Green colors for ETF vertices 
+    if C <= 3:
+        green_colors = ['#90EE90', '#32CD32', '#006400'][:C]  # Original colors for small C
+    else:
+        cmap = cm.get_cmap('Greens')
+        green_colors = [to_hex(cmap(0.3 + 0.7 * i / (C-1))) for i in range(C)]
+    
+    # Red colors for classifiers
+    if C <= 3:
+        red_colors = ['#FF6B6B', '#DC143C', '#8B0000'][:C]   # Original colors for small C
+    else:
+        cmap = cm.get_cmap('Reds') 
+        red_colors = [to_hex(cmap(0.3 + 0.7 * i / (C-1))) for i in range(C)]
+    
+    # Blue colors for class means and features
+    if C <= 3:
+        blue_colors = ['#87CEEB', '#1E90FF', '#00008B'][:C]  # Original colors for small C  
+    else:
+        cmap = cm.get_cmap('Blues')
+        blue_colors = [to_hex(cmap(0.3 + 0.7 * i / (C-1))) for i in range(C)]
     
     # 1. Compute Simplex ETF
     ETF = compute_simplex_etf(C, p)  # (p, C)
@@ -226,11 +245,12 @@ def visualize_nc_figure1(
     ETF_2d_initial = project_to_2d(centered_data['ETF_normalized'], projection_matrix)
     origin_2d = np.array([0, 0])
     
-    # 3.5. Fix ETF at canonical angles (90°, 210°, 330°) and rotate everything to align
+    # 3.5. Fix ETF at canonical angles and rotate everything to align
     # This makes the theoretical target stationary and shows convergence clearly
     
-    # Define target ETF positions (evenly spaced, starting at 90°)
-    target_angles = np.array([np.pi/2, 7*np.pi/6, 11*np.pi/6])  # 90°, 210°, 330°
+    # Define target ETF positions (evenly spaced around unit circle)
+    C = ETF_2d_initial.shape[0]  # Number of classes
+    target_angles = np.linspace(0, 2*np.pi, C, endpoint=False) + np.pi/2  # Start at 90°
     ETF_2d_fixed = np.array([[np.cos(a), np.sin(a)] for a in target_angles])  # (C, 2)
     
     # Normalize projected ETF to unit circle

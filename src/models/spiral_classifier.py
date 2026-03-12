@@ -1,17 +1,16 @@
 """
 Spiral Classifier for Dynamical SGD Analysis
 
-This module implements a neural network classifier for spiral datasets with dynamic batch 
-training that focuses on different classes periodically. The classifier is designed to 
-study the internal reconfiguration of neural networks when trained with dynamically 
-composed batches.
+This module implements a neural network classifier with dynamic batch training that 
+focuses on different classes periodically. Supports both MLP and DenseNet-40 architectures.
 
 Key Features:
-- Generates spiral datasets with configurable parameters
+- Supports MLP and DenseNet-40 architectures
 - Implements periodic class-focused training dynamics
 - Tracks weight evolution and gradient distributions over time
 - Provides visualization tools for decision boundaries and internal dynamics
 - Analyzes layer-wise parameter changes and correlations
+- Compatible with Neural Collapse analysis
 
 Author: Nicolas Ratier Werbin
 Email: nicolasratierwerbin@gmail.com
@@ -22,7 +21,6 @@ import jax.numpy as jnp
 from jax import random, jit, grad
 from jax.example_libraries import stax
 from jax.tree_util import tree_map
-from jax.nn.initializers import zeros
 import optax
 from functools import partial
 from pathlib import Path
@@ -33,29 +31,9 @@ from tqdm import tqdm
 import pickle
 import imageio
 
-def DenseNoBias(out_dim, W_init=None):
-    """
-    Dense layer without bias parameter for Neural Collapse analysis.
-    
-    Args:
-        out_dim: Output dimension
-        W_init: Weight initialization function (defaults to glorot_normal)
-        
-    Returns:
-        init_fun, apply_fun: JAX stax-compatible layer functions
-    """
-    if W_init is None:
-        W_init = stax.glorot_normal()
-    
-    def init_fun(rng, input_shape):
-        k = random.split(rng)[0]
-        W = W_init(k, (input_shape[-1], out_dim))
-        return input_shape[:-1] + (out_dim,), W
-
-    def apply_fun(W, inputs, **kwargs):
-        return jnp.dot(inputs, W)
-
-    return init_fun, apply_fun
+# Import model architectures
+from .densenet import DenseNet40, calculate_densenet40_feature_dim
+from .mlp_layers import DenseNoBias, create_mlp_architecture
 
 # Configure JAX to use GPU if available
 try:
@@ -64,6 +42,10 @@ try:
 except:
     print("Using CPU for JAX (GPU not available)")
 
+
+# =============================================================================
+# SpiralClassifier (Unified Classifier for MLP and DenseNet40)
+# =============================================================================
 
 class SpiralClassifier:
     """
@@ -94,6 +76,7 @@ class SpiralClassifier:
     
     def __init__(
         self,
+        input_dim: int = 2,        # NEW: Input dimension (2 for spiral, 784 for MNIST)
         points_per_class: int = 100,
         num_classes: int = 3,
         nn_width: int = 100,
@@ -116,7 +99,12 @@ class SpiralClassifier:
         beta2: float = 0.999,
         eps: float = 1e-8,
         # Initialization parameters
-        weight_init_scale: float = 1.0
+        weight_init_scale: float = 1.0,
+        # Architecture selection
+        architecture: str = "mlp",  # "mlp" or "densenet40"
+        growth_rate: int = 12,  # For DenseNet
+        compression: float = 0.5,  # For DenseNet
+        dropout_rate: float = 0.0,  # For DenseNet
     ):
         """
         Initialize the SpiralClassifier (Neural Collapse compliant).
@@ -140,6 +128,7 @@ class SpiralClassifier:
             use_bias: Whether to include bias terms in Dense layers (default: True)
         """
         # Basic configuration
+        self.input_dim = input_dim              # NEW: Store input dimension
         self.points_per_class = points_per_class
         self.num_classes = num_classes
         self.nn_width = nn_width
@@ -150,6 +139,12 @@ class SpiralClassifier:
         self.label = label
         self.use_batchnorm = use_batchnorm
         self.use_bias = use_bias
+        
+        # Architecture configuration
+        self.architecture = architecture.lower()
+        self.growth_rate = growth_rate
+        self.compression = compression
+        self.dropout_rate = dropout_rate
         
         # Optimizer parameters
         self.momentum = momentum
@@ -231,36 +226,32 @@ class SpiralClassifier:
         Create Neural Collapse compliant architecture.
         
         Architecture follows Papyan et al. (2020):
-        - Feature Extractor h(x): Dense → [BatchNorm] → ReLU (repeated)
+        - Feature Extractor h(x): Dense → [BatchNorm] → ReLU (repeated) OR DenseNet40
         - Linear Classifier: W·h(x) + b
         
         Returns:
-            A tuple containing the initialization and application functions
+            A tuple containing the initialization and application functions (for MLP)
+            or the Flax module (for DenseNet40)
         """
-        # Build feature extractor h(x) with stacked Dense → [BatchNorm] → ReLU blocks
-        layers = []
+        if self.architecture == "densenet40":
+            # Return DenseNet40 Flax module
+            return DenseNet40(
+                num_classes=self.num_classes,
+                growth_rate=self.growth_rate,
+                compression=self.compression,
+                dropout_rate=self.dropout_rate,
+                use_bias=self.use_bias
+            )
         
-        # First layer: Input (2D) → nn_width (always use bias for feature extractor)
-        layers.append(stax.Dense(self.nn_width))
-        if self.use_batchnorm:
-            layers.append(stax.BatchNorm(axis=(0,)))  # Prevents weight explosion
-        layers.append(stax.Relu)
-        
-        # Hidden layers: nn_width → nn_width (Dense → [BatchNorm] → ReLU, always use bias)
-        for _ in range(self.num_hidden_layers - 1):
-            layers.append(stax.Dense(self.nn_width))
-            if self.use_batchnorm:
-                layers.append(stax.BatchNorm(axis=(0,)))  # Prevents weight explosion
-            layers.append(stax.Relu)
-        
-        # Final linear classifier: W·h(x) + b (configurable bias for Neural Collapse analysis)
-        if self.use_bias:
-            layers.append(stax.Dense(self.num_classes))
-        else:
-            # Use custom DenseNoBias layer to completely remove bias parameter
-            layers.append(DenseNoBias(self.num_classes))
-        
-        return stax.serial(*layers)
+        # Default MLP architecture using helper function
+        return create_mlp_architecture(
+            input_dim=self.input_dim,
+            hidden_dim=self.nn_width,
+            num_hidden_layers=self.num_hidden_layers,
+            num_classes=self.num_classes,
+            use_batchnorm=self.use_batchnorm,
+            use_bias_classifier=self.use_bias
+        )
     
     def initialize_params(self, random_seed: Optional[int] = None) -> Any:
         """
@@ -273,8 +264,18 @@ class SpiralClassifier:
             Initialized model parameters
         """
         seed = random_seed if random_seed is not None else 0
-        _, params = self.model[0](random.PRNGKey(seed), (-1, 2))
-        return params
+        key = random.PRNGKey(seed)
+        
+        if self.architecture == "densenet40":
+            # DenseNet40 expects images of shape (B, H, W, C)
+            # For MNIST: (B, 28, 28, 1)
+            dummy_input = jnp.ones((1, 28, 28, 1))
+            params = self.model.init(key, dummy_input, train=False)
+            return params
+        else:
+            # MLP architecture
+            _, params = self.model[0](key, (-1, self.input_dim))
+            return params
     
     def get_features(self, params: Any, X: jnp.ndarray, is_training: bool = False) -> jnp.ndarray:
         """
@@ -283,22 +284,26 @@ class SpiralClassifier:
         This method extracts features from the penultimate layer (before the final
         linear classifier), following the Neural Collapse paper's definition of h(x).
         
-        Architecture with BatchNorm:
+        Architecture with BatchNorm (MLP):
             x → [Dense → BatchNorm → ReLU] × num_hidden_layers → h(x) → [Dense] → logits
                 └────────── Feature Extractor ──────────┘              └─ Classifier ─┘
         
-        Architecture without BatchNorm:
-            x → [Dense → ReLU] × num_hidden_layers → h(x) → [Dense] → logits
-                └────────── Feature Extractor ──────────┘              └─ Classifier ─┘
+        Architecture (DenseNet40):
+            x → DenseNet Blocks → Global Pool → h(x) → [Dense] → logits
         
         Args:
-            params: Model parameters (list of layer parameters)
-            X: Input data of shape (N, input_dim)
+            params: Model parameters (list of layer parameters or Flax params dict)
+            X: Input data of shape (N, input_dim) for MLP or (N, H, W, C) for DenseNet
             is_training: Whether in training mode (affects BatchNorm)
             
         Returns:
-            Features h(x) of shape (N, nn_width)
+            Features h(x) of shape (N, feature_dim)
         """
+        if self.architecture == "densenet40":
+            # DenseNet40 using Flax
+            return self.model.apply(params, X, train=is_training, return_features=True)
+        
+        # MLP architecture
         h = X
         num_blocks = self.num_hidden_layers
         
@@ -337,12 +342,78 @@ class SpiralClassifier:
                 
                 # ReLU (creates empty tuple at param_idx + 1)
                 h = jnp.maximum(0, h)
-                h = jnp.dot(h, W) + b
-                
-                # ReLU (no parameters)
-                h = jnp.maximum(0, h)
         
         return h
+    
+    def predict(self, params: Any, X: jnp.ndarray, is_training: bool = False) -> jnp.ndarray:
+        """
+        Make predictions using the model.
+        
+        Args:
+            params: Model parameters
+            X: Input data
+            is_training: Whether in training mode (affects BatchNorm/Dropout)
+            
+        Returns:
+            Model predictions (logits)
+        """
+        if self.architecture == "densenet40":
+            return self.model.apply(params, X, train=is_training, return_features=False)
+        else:
+            # MLP: use stax model
+            return self.model[1](params, X)
+    
+    def get_classifier_weights(self, params: Any) -> Tuple[jnp.ndarray, Optional[jnp.ndarray]]:
+        """
+        Extract classifier weights W and biases b from the final layer.
+        
+        Args:
+            params: Model parameters
+            
+        Returns:
+            Tuple of (W, b):
+                - W: Classifier weights of shape (num_classes, feature_dim)
+                - b: Classifier biases of shape (num_classes,) or None if use_bias=False
+        """
+        if self.architecture == "densenet40":
+            # Flax DenseNet40: params is a nested dict
+            # Structure: params['params']['Dense_N']['kernel'] and optionally ['bias']
+            # Find the last Dense layer (classifier) - it should be the only one at top level
+            dense_params = params['params']
+            
+            # Find all Dense layers
+            dense_keys = [key for key in dense_params.keys() if 'Dense' in key]
+            if not dense_keys:
+                raise ValueError("Could not find Dense classifier in DenseNet40 parameters")
+            
+            # Get the last Dense layer (highest number or last in list)
+            # Sort to ensure we get the final classifier
+            dense_keys_sorted = sorted(dense_keys)
+            classifier_key = dense_keys_sorted[-1]
+            
+            W = dense_params[classifier_key]['kernel'].T  # (num_classes, feature_dim)
+            b = dense_params[classifier_key].get('bias', None)  # (num_classes,) or None
+            
+            return W, b
+        else:
+            # MLP: stax format
+            # Calculate classifier index
+            if self.use_batchnorm:
+                classifier_idx = self.num_hidden_layers * 3  # Dense + BatchNorm + ReLU
+            else:
+                classifier_idx = self.num_hidden_layers * 2  # Dense + ReLU
+            
+            classifier_params = params[classifier_idx]
+            if self.use_bias:
+                W_last, b_last = classifier_params
+                W = W_last.T  # (num_classes, feature_dim)
+                b = b_last    # (num_classes,)
+            else:
+                W_last = classifier_params[0] if isinstance(classifier_params, tuple) else classifier_params
+                W = W_last.T  # (num_classes, feature_dim)
+                b = None
+            
+            return W, b
     
     @partial(jit, static_argnums=(0,))
     def make_dataset(
@@ -452,7 +523,7 @@ class SpiralClassifier:
             Cross-entropy loss value
         """
         # Forward pass
-        predictions = self.model[1](params, X)
+        predictions = self.predict(params, X, is_training=True)
         
         # Cross-entropy loss
         log_probs = jax.nn.log_softmax(predictions)
@@ -468,23 +539,44 @@ class SpiralClassifier:
         
         return loss
     
-    @partial(jit, static_argnums=(0,))
-    def accuracy(self, params: Any, X: jnp.ndarray, Y: jnp.ndarray) -> float:
+    def accuracy(self, params: Any, X: jnp.ndarray, Y: jnp.ndarray, batch_size: int = 5000) -> float:
         """
-        Compute classification accuracy.
+        Compute classification accuracy with batching to avoid OOM on large datasets.
         
         Args:
             params: Model parameters
             X: Input features
             Y: One-hot encoded labels
+            batch_size: Batch size for computation (to avoid OOM on large datasets)
             
         Returns:
             Classification accuracy (fraction of correct predictions)
         """
-        predictions = self.model[1](params, X)
-        predicted_classes = jnp.argmax(predictions, axis=1)
-        true_classes = jnp.argmax(Y, axis=1)
-        return jnp.mean(predicted_classes == true_classes)
+        # For large datasets, use batching
+        if X.shape[0] > 10000:
+            num_samples = X.shape[0]
+            num_batches = (num_samples + batch_size - 1) // batch_size
+            correct_predictions = 0
+            
+            for i in range(num_batches):
+                start_idx = i * batch_size
+                end_idx = min((i + 1) * batch_size, num_samples)
+                X_batch = X[start_idx:end_idx]
+                Y_batch = Y[start_idx:end_idx]
+                
+                predictions = self.predict(params, X_batch, is_training=False)
+                predicted_classes = jnp.argmax(predictions, axis=1)
+                true_classes = jnp.argmax(Y_batch, axis=1)
+                batch_acc = jnp.mean(predicted_classes == true_classes)
+                correct_predictions += float(batch_acc) * (end_idx - start_idx)
+            
+            return correct_predictions / num_samples
+        else:
+            # For small datasets, compute directly
+            predictions = self.predict(params, X, is_training=False)
+            predicted_classes = jnp.argmax(predictions, axis=1)
+            true_classes = jnp.argmax(Y, axis=1)
+            return jnp.mean(predicted_classes == true_classes)
     
     def update_step(
         self, 

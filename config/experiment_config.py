@@ -16,25 +16,38 @@ from pathlib import Path
 class DataConfig:
     """Configuration for dataset generation and processing."""
     
-    points_per_class: int = 100
+    # Dataset selection
+    dataset_name: str = "spiral"  # "spiral" or "mnist"
+    
+    # Common parameters
     num_classes: int = 3
+    test_ratio: float = 0.2
+    random_seed: Optional[int] = 0
+    
+    # Spiral-specific parameters
+    points_per_class: int = 100
     revolutions: float = 4.0
     noise_std: float = 0.2
-    test_ratio: float = 0.2
     normalization_method: str = "none"  # "standardize", "minmax", "none"
     augmentation: bool = False
     augmentation_noise_std: float = 0.05
     augmentation_rotation_range: float = 0.1
-    random_seed: Optional[int] = 0
     randomize_offsets: bool = False  # Generate random angular offsets for spirals
     angular_offsets: Optional[List[float]] = None  # Custom angular offsets in degrees
     min_radius: float = 0.05  # Minimum radius to avoid points at origin (0,0)
+    
+    # MNIST-specific parameters
+    data_dir: str = "./data"
+    flatten: bool = True          # Flatten 28x28 images to 784-dim vectors for MLP
+    normalize: bool = True        # Apply standard MNIST normalization
+    download: bool = True         # Download MNIST if not present
 
 
 @dataclass
 class ModelConfig:
     """Configuration for neural network model."""
     
+    input_dim: int = 2            # Input dimension (2 for spiral, 784 for MNIST)
     nn_width: int = 100
     num_hidden_layers: int = 1  # Number of Dense → BatchNorm → ReLU blocks
     num_classes: int = 3
@@ -43,6 +56,16 @@ class ModelConfig:
     use_batchnorm: bool = True  # Whether to include BatchNorm layers
     weight_init_scale: float = 1.0
     random_seed: Optional[int] = 0
+    
+    # Architecture selection (NEW for DenseNet-40 support)
+    architecture: str = "mlp"  # "mlp" or "densenet40"
+    
+    # DenseNet-40 specific parameters (NEW)
+    growth_rate: int = 12          # Number of feature maps per layer
+    num_init_features: int = 16    # Initial convolution filters
+    block_config: Tuple[int, int, int] = (12, 12, 12)  # Layers in each dense block
+    compression: float = 0.5       # Compression factor in transition layers
+    dropout_rate: float = 0.0      # Dropout rate (0.0 for NC papers)
 
 
 @dataclass
@@ -66,9 +89,13 @@ class DynamicsConfig:
     period_length: int = 5000
     w_max: float = 70.0
     class_focus_pattern: str = "sequential"  # "sequential", "random"
-    enable_dynamics: bool = True
-    bumps_TPT: bool = False  # If False, stop bumping after reaching TPT accuracy threshold
+    bumps_before_TPT: bool = True   # Apply bumps before reaching TPT accuracy threshold
+    bumps_at_TPT: bool = False      # Apply bumps during/after reaching TPT accuracy threshold
     tpt_accuracy_threshold: float = 1.0  # Accuracy threshold for Terminal Phase Training (e.g., 0.99)
+    
+    def dynamics_enabled(self) -> bool:
+        """Check if any dynamics are enabled."""
+        return self.bumps_before_TPT or self.bumps_at_TPT
 
 
 @dataclass
@@ -167,14 +194,29 @@ class ExperimentConfig:
     def _validate_config(self):
         """Validate configuration parameters."""
         # Validate data config
-        if self.data.points_per_class <= 0:
-            raise ValueError("points_per_class must be positive")
+        # points_per_class is only applicable for spiral datasets (can be None for MNIST)
+        if self.data.points_per_class is not None and self.data.points_per_class <= 0:
+            raise ValueError("points_per_class must be positive when specified")
         if self.data.num_classes <= 0:
             raise ValueError("num_classes must be positive")
-        if not 0 <= self.data.test_ratio <= 1:
-            raise ValueError("test_ratio must be between 0 and 1")
         
-        # Validate model config
+        # test_ratio validation - can be None for datasets with predefined splits (like MNIST)
+        if self.data.test_ratio is not None and not 0 <= self.data.test_ratio <= 1:
+            raise ValueError("test_ratio must be between 0 and 1 when specified")
+        
+        # Validate dataset-specific parameters
+        dataset_name = getattr(self.data, 'dataset_name', 'spiral')
+        if dataset_name == 'spiral':
+            if self.data.points_per_class is None:
+                raise ValueError("points_per_class must be specified for spiral dataset")
+            if self.data.test_ratio is None:
+                raise ValueError("test_ratio must be specified for spiral dataset")
+        elif dataset_name == 'mnist':
+            # For MNIST, both points_per_class and test_ratio should be None
+            # (but we can be lenient if they are specified)
+            pass
+        
+        # Validate model config  
         if self.model.nn_width <= 0:
             raise ValueError("nn_width must be positive")
         if self.model.num_classes != self.data.num_classes:

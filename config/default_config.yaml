@@ -47,8 +47,8 @@ dynamics:
   period_length: 5000
   w_max: 70.0
   class_focus_pattern: "sequential"
-  enable_dynamics: true
-  bumps_TPT: false  # Stop bumping after reaching TPT threshold
+  bumps_before_TPT: true   # Apply bumps before reaching TPT accuracy threshold
+  bumps_at_TPT: false      # Apply bumps during/after reaching TPT accuracy threshold
   tpt_accuracy_threshold: 1.0  # Accuracy threshold for Terminal Phase Training (1.0 = 100%, 0.99 = 99%)
 
 # Training configuration

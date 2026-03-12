@@ -22,7 +22,7 @@ project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
 from src.models.spiral_classifier import SpiralClassifier
-from utils.data_utils import generate_spiral_data, create_train_test_split, DataLoader
+from utils.data_utils import load_dataset, create_train_test_split, DataLoader
 from utils.visualization import (
     plot_spiral_dataset, plot_decision_boundary, plot_training_curves,
     plot_training_curves_with_classes, plot_class_focus_dynamics, setup_matplotlib_style
@@ -113,7 +113,8 @@ def create_output_directory(config: ExperimentConfig) -> Path:
 
 def generate_and_prepare_data(config: ExperimentConfig):
     """Generate and prepare dataset according to configuration."""
-    logging.info("Generating spiral dataset...")
+    dataset_name = getattr(config.data, 'dataset_name', 'spiral')
+    logging.info(f"Loading {dataset_name} dataset...")
     
     # Use training.random_seed if provided, otherwise fall back to data.random_seed
     # This ensures the seed affects both data generation and training
@@ -121,33 +122,39 @@ def generate_and_prepare_data(config: ExperimentConfig):
     if seed is not None:
         logging.info(f"Using random seed for data generation: {seed}")
     
-    # Generate training data
-    X_train, Y_train = generate_spiral_data(
-        points_per_class=config.data.points_per_class,
-        num_classes=config.data.num_classes,
-        revolutions=config.data.revolutions,
-        noise_std=config.data.noise_std,
-        random_seed=seed,
-        angular_offsets=getattr(config.data, 'angular_offsets', None),
-        randomize_offsets=getattr(config.data, 'randomize_offsets', False),
-        min_radius=getattr(config.data, 'min_radius', 0.05)
+    # Create dataset configuration for load_dataset function
+    if dataset_name.lower() == 'spiral':
+        dataset_config = {
+            "points_per_class": config.data.points_per_class,
+            "num_classes": config.data.num_classes,
+            "revolutions": config.data.revolutions,
+            "noise_std": config.data.noise_std,
+            "test_ratio": getattr(config.data, 'test_ratio', 0.25),
+            "angular_offsets": getattr(config.data, 'angular_offsets', None),
+            "randomize_offsets": getattr(config.data, 'randomize_offsets', False),
+            "min_radius": getattr(config.data, 'min_radius', 0.05)
+        }
+    elif dataset_name.lower() == 'mnist':
+        dataset_config = {
+            "data_dir": getattr(config.data, 'data_dir', './data'),
+            "flatten": getattr(config.data, 'flatten', True),
+            "normalize": getattr(config.data, 'normalize', True),
+            "download": getattr(config.data, 'download', True)
+        }
+    else:
+        raise ValueError(f"Unknown dataset: {dataset_name}. Supported: 'spiral', 'mnist'")
+    
+    # Load dataset using unified function
+    (X_train, Y_train), (X_test, Y_test) = load_dataset(
+        dataset_name=dataset_name,
+        dataset_config=dataset_config,
+        random_seed=seed
     )
     
-    # Generate test data with different seed
-    test_seed = seed + 1 if seed is not None else 1
-    X_test, Y_test = generate_spiral_data(
-        points_per_class=config.data.points_per_class,
-        num_classes=config.data.num_classes,
-        revolutions=config.data.revolutions,
-        noise_std=config.data.noise_std,
-        random_seed=test_seed,
-        angular_offsets=getattr(config.data, 'angular_offsets', None),
-        randomize_offsets=getattr(config.data, 'randomize_offsets', False),
-        min_radius=getattr(config.data, 'min_radius', 0.05)
-    )
-    
-    logging.info(f"Generated training set: {X_train.shape[0]} samples")
-    logging.info(f"Generated test set: {X_test.shape[0]} samples")
+    logging.info(f"Loaded {dataset_name} dataset:")
+    logging.info(f"  Training set: {X_train.shape[0]} samples, shape: {X_train.shape}")
+    logging.info(f"  Test set: {X_test.shape[0]} samples, shape: {X_test.shape}")
+    logging.info(f"  Number of classes: {Y_train.shape[1]}")
     
     return X_train, Y_train, X_test, Y_test
 
@@ -163,9 +170,25 @@ def create_and_train_model(
     """Create and train the spiral classifier."""
     logging.info("Creating classifier...")
     
-    # Create classifier
+    # Get input dimension from data
+    # For flattened data (MLP): (N, 784) -> input_dim = 784
+    # For images (CNN/DenseNet): (N, 28, 28, 1) -> input_dim = 784 (product of all dims except batch)
+    if len(X_train.shape) == 2:
+        input_dim = X_train.shape[1]  # Flattened: (N, features)
+    else:
+        # Multi-dimensional input (images): (N, H, W, C)
+        input_dim = int(jnp.prod(jnp.array(X_train.shape[1:])))  # Product of H*W*C
+    
+    # Handle points_per_class for different datasets
+    points_per_class = config.data.points_per_class
+    if points_per_class is None:
+        # For MNIST or other datasets where points_per_class is not applicable
+        # Use a reasonable default (this is mainly for classifier labeling/tracking)
+        points_per_class = 100
+    
     classifier = SpiralClassifier(
-        points_per_class=config.data.points_per_class,
+        input_dim=input_dim,           # NEW: Pass input dimension
+        points_per_class=points_per_class,
         num_classes=config.data.num_classes,
         nn_width=config.model.nn_width,
         num_hidden_layers=getattr(config.model, 'num_hidden_layers', 1),
@@ -187,18 +210,24 @@ def create_and_train_model(
         beta2=getattr(config.optimizer, 'beta2', 0.999),
         eps=getattr(config.optimizer, 'eps', 1e-8),
         # Initialization parameters
-        weight_init_scale=getattr(config.model, 'weight_init_scale', 1.0)
+        weight_init_scale=getattr(config.model, 'weight_init_scale', 1.0),
+        # Architecture selection
+        architecture=getattr(config.model, 'architecture', 'mlp'),
+        growth_rate=getattr(config.model, 'growth_rate', 12),
+        compression=getattr(config.model, 'compression', 0.5),
+        dropout_rate=getattr(config.model, 'dropout_rate', 0.0)
     )
     
     # Setup metrics tracking
     metrics_tracker = MetricsTracker(
         track_calibration=True,
         track_per_class=True,
-        num_classes=config.data.num_classes
+        num_classes=config.data.num_classes,
+        eval_batch_size=5000  # Use batched evaluation to avoid OOM on large datasets (e.g., MNIST)
     )
     
     # Validate dynamics configuration and warn about potential issues
-    if config.dynamics.enable_dynamics:
+    if config.dynamics.dynamics_enabled():
         # Compute example class weights to check distribution
         example_weights = classifier.compute_class_weights(
             0, 0, config.dynamics.w_max, config.dynamics.period_length
@@ -286,12 +315,37 @@ def create_and_train_model(
     nc_analyzer = None
     if config.analysis.track_neural_collapse:
         logging.info("Neural Collapse tracking enabled")
+        
+        # Determine feature dimension based on architecture
+        architecture = getattr(config.model, 'architecture', 'mlp').lower()
+        if architecture == 'densenet40':
+            # Calculate DenseNet40 feature dimension
+            # Initial: 16, Block1: 16+12*12=160, Trans1: 80, Block2: 80+12*12=224, Trans2: 112, Block3: 112+12*12=256
+            num_init_features = getattr(config.model, 'num_init_features', 16)
+            growth_rate = getattr(config.model, 'growth_rate', 12)
+            compression = getattr(config.model, 'compression', 0.5)
+            block_config = getattr(config.model, 'block_config', (12, 12, 12))
+            
+            num_features = num_init_features
+            for i, num_layers in enumerate(block_config):
+                num_features += num_layers * growth_rate
+                # Apply transition compression except after last block
+                if i < len(block_config) - 1:
+                    num_features = int(num_features * compression)
+            
+            feature_dim = num_features
+            logging.info(f"DenseNet-40 feature dimension: {feature_dim}")
+        else:
+            feature_dim = config.model.nn_width
+            logging.info(f"MLP feature dimension: {feature_dim}")
+        
         nc_analyzer = NeuralCollapseAnalyzer(
             num_classes=config.data.num_classes,
-            feature_dim=config.model.nn_width,
+            feature_dim=feature_dim,
             num_hidden_layers=getattr(config.model, 'num_hidden_layers', 1),
             use_batchnorm=getattr(config.model, 'use_batchnorm', True),
-            use_bias=getattr(config.model, 'use_bias', True)
+            use_bias=getattr(config.model, 'use_bias', True),
+            classifier=classifier  # Pass classifier object for architecture-specific handling
         )
         # Define snapshot epochs
         snapshot_interval = config.analysis.nc_snapshot_interval
@@ -335,11 +389,13 @@ def create_and_train_model(
     
     with tqdm(total=config.training.total_steps, desc="Training") as pbar:
         for t in range(config.training.total_steps):
-            # Determine if we should apply bumping dynamics
-            apply_bumping = config.dynamics.enable_dynamics
-            if terminal_full_training_reached and not config.dynamics.bumps_TPT:
-                # Stop bumping after 100% accuracy if bumps_TPT is False
-                apply_bumping = False
+            # Determine if we should apply bumping dynamics based on TPT state
+            if terminal_full_training_reached:
+                # After TPT: use bumps_at_TPT setting
+                apply_bumping = config.dynamics.bumps_at_TPT
+            else:
+                # Before TPT: use bumps_before_TPT setting
+                apply_bumping = config.dynamics.bumps_before_TPT
             
             if apply_bumping:
                 # Dynamic class focus
@@ -382,11 +438,11 @@ def create_and_train_model(
                     step_100_acc = t
                     terminal_full_training_reached = True
                     logging.info(f"🎯 Terminal Phase Training ({tpt_threshold*100:.1f}% accuracy) reached at step {t}")
-                    if config.dynamics.enable_dynamics:
-                        if config.dynamics.bumps_TPT:
-                            logging.info(f"   Continuing bumps after {tpt_threshold*100:.1f}% accuracy (bumps_TPT=true)")
+                    if config.dynamics.dynamics_enabled():
+                        if config.dynamics.bumps_at_TPT:
+                            logging.info(f"   Continuing bumps after {tpt_threshold*100:.1f}% accuracy (bumps_at_TPT=true)")
                         else:
-                            logging.info(f"   Stopping bumps after {tpt_threshold*100:.1f}% accuracy (bumps_TPT=false)")
+                            logging.info(f"   Stopping bumps after {tpt_threshold*100:.1f}% accuracy (bumps_at_TPT=false)")
                 
                 # Update progress bar with latest metrics and refresh display
                 pbar.set_postfix({
@@ -420,13 +476,22 @@ def create_and_train_model(
                     Y_test=Y_test   # ✅ FULL test labels for NC4 metric
                 )
                 
+                # Clear GPU memory after NC snapshot (memory-intensive operation)
+                import gc
+                gc.collect()
+                
                 # Store NC metrics for later saving (don't log them)
     
     # Store final parameters
     classifier.last_params = params
     
-    # Final evaluation
+    # Clear GPU cache before final evaluation to avoid OOM
+    import gc
+    gc.collect()
+    
+    # Final evaluation with batching (handled inside accuracy method)
     final_train_acc = float(classifier.accuracy(params, X_train, Y_train))
+    gc.collect()  # Clear memory between train and test
     final_test_acc = float(classifier.accuracy(params, X_test, Y_test))
     
     logging.info(f"Final training accuracy: {final_train_acc:.8f}")
@@ -510,7 +575,7 @@ def create_visualizations(
                 test_losses_per_class=test_losses_per_class,
                 test_accuracies_per_class=test_accuracies_per_class,
                 metric_steps=metric_steps,
-                period_length=config.dynamics.period_length if config.dynamics.enable_dynamics else None,
+                period_length=config.dynamics.period_length if config.dynamics.dynamics_enabled() else None,
                 title="Training Progress with Per-Class Breakdown",
                 step_100_acc=step_100_acc,
                 tpt_threshold=tpt_threshold,
@@ -524,7 +589,7 @@ def create_visualizations(
                 test_losses,
                 test_accuracies,
                 metric_steps=metric_steps,
-                period_length=config.dynamics.period_length if config.dynamics.enable_dynamics else None,
+                period_length=config.dynamics.period_length if config.dynamics.dynamics_enabled() else None,
                 title="Training Progress",
                 step_100_acc=step_100_acc,
                 tpt_threshold=tpt_threshold
@@ -533,8 +598,10 @@ def create_visualizations(
         plt.close()
     
     # Plot class focus dynamics
-    if config.dynamics.enable_dynamics:
-        steps = jnp.arange(0, config.training.total_steps, 100)
+    if config.dynamics.dynamics_enabled():
+        # Adaptive step size for visualization based on total training steps
+        viz_step_size = max(1, config.training.total_steps // 50)  # At least 1, aim for ~50 points
+        steps = jnp.arange(0, config.training.total_steps, viz_step_size)
         plot_class_focus_dynamics(
             steps,
             classifier.compute_class_weights,
@@ -771,15 +838,83 @@ def main():
         logging.info("Saving initial dataset visualizations...")
         setup_matplotlib_style(config.visualization.plot_style)
         
-        plot_spiral_dataset(X_train, Y_train, title="Training Dataset")
-        plt.savefig(output_dir / "training_dataset.png", dpi=config.visualization.figure_dpi)
-        plt.close()
-        logging.info(f"Saved training dataset plot: {output_dir / 'training_dataset.png'}")
-        
-        plot_spiral_dataset(X_test, Y_test, title="Test Dataset")
-        plt.savefig(output_dir / "test_dataset.png", dpi=config.visualization.figure_dpi)
-        plt.close()
-        logging.info(f"Saved test dataset plot: {output_dir / 'test_dataset.png'}")
+        # Only create scatter plots for 2D data (spiral dataset)
+        if X_train.shape[1] == 2:
+            # Spiral dataset - create scatter plots
+            plot_spiral_dataset(X_train, Y_train, title="Training Dataset")
+            plt.savefig(output_dir / "training_dataset.png", dpi=config.visualization.figure_dpi)
+            plt.close()
+            logging.info(f"Saved training dataset plot: {output_dir / 'training_dataset.png'}")
+            
+            plot_spiral_dataset(X_test, Y_test, title="Test Dataset")
+            plt.savefig(output_dir / "test_dataset.png", dpi=config.visualization.figure_dpi)
+            plt.close()
+            logging.info(f"Saved test dataset plot: {output_dir / 'test_dataset.png'}")
+        else:
+            # High-dimensional data (MNIST) - create sample visualization
+            logging.info(f"High-dimensional data ({X_train.shape[1]}D) detected - creating sample visualizations...")
+            
+            # Create a grid of sample images for MNIST
+            fig, axes = plt.subplots(2, 5, figsize=(12, 6))
+            fig.suptitle("Training Dataset Samples", fontsize=16)
+            
+            # Show one sample from each class (for MNIST: 0-9)
+            labels_train = jnp.argmax(Y_train, axis=1)
+            for class_idx in range(min(10, Y_train.shape[1])):  # Up to 10 classes
+                # Find first sample of this class
+                mask = labels_train == class_idx
+                if jnp.sum(mask) > 0:
+                    sample_idx = jnp.where(mask)[0][0]
+                    sample_data = X_train[sample_idx]
+                    
+                    # Reshape to image if it's flattened (MNIST: 784 -> 28x28)
+                    if len(sample_data.shape) == 1 and sample_data.shape[0] == 784:
+                        sample_image = sample_data.reshape(28, 28)
+                    else:
+                        sample_image = sample_data.squeeze()
+                    
+                    row, col = divmod(class_idx, 5)
+                    axes[row, col].imshow(sample_image, cmap='gray')
+                    axes[row, col].set_title(f'Class {class_idx}')
+                    axes[row, col].axis('off')
+                else:
+                    # No samples for this class
+                    row, col = divmod(class_idx, 5)
+                    axes[row, col].text(0.5, 0.5, f'Class {class_idx}\n(No samples)', 
+                                       ha='center', va='center', transform=axes[row, col].transAxes)
+                    axes[row, col].axis('off')
+            
+            plt.tight_layout()
+            plt.savefig(output_dir / "training_dataset_samples.png", dpi=config.visualization.figure_dpi)
+            plt.close()
+            logging.info(f"Saved training dataset samples: {output_dir / 'training_dataset_samples.png'}")
+            
+            # Create dataset statistics plot
+            labels_train = jnp.argmax(Y_train, axis=1)
+            labels_test = jnp.argmax(Y_test, axis=1)
+            
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+            
+            # Class distribution for training set
+            unique_train, counts_train = jnp.unique(labels_train, return_counts=True)
+            ax1.bar(unique_train, counts_train, alpha=0.7, color='skyblue')
+            ax1.set_title('Training Set Class Distribution')
+            ax1.set_xlabel('Class')
+            ax1.set_ylabel('Number of Samples')
+            ax1.grid(True, alpha=0.3)
+            
+            # Class distribution for test set  
+            unique_test, counts_test = jnp.unique(labels_test, return_counts=True)
+            ax2.bar(unique_test, counts_test, alpha=0.7, color='lightcoral')
+            ax2.set_title('Test Set Class Distribution')
+            ax2.set_xlabel('Class')
+            ax2.set_ylabel('Number of Samples')
+            ax2.grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            plt.savefig(output_dir / "dataset_statistics.png", dpi=config.visualization.figure_dpi)
+            plt.close()
+            logging.info(f"Saved dataset statistics: {output_dir / 'dataset_statistics.png'}")
         
         # Train model
         classifier, train_losses, train_accuracies, test_losses, test_accuracies, metric_steps, nc_analyzer, step_100_acc, metrics_tracker = create_and_train_model(
@@ -838,7 +973,9 @@ def main():
             # (visualize_neural_collapse methods are stubs)
             
             # Create NC Figure 1 visualization (Papyan et al. style)
-            if config.visualization.save_nc_visualizations:
+            # Skip for large datasets to avoid OOM (PCA on 60k samples requires too much memory)
+            num_samples = X_train.shape[0]
+            if config.visualization.save_nc_visualizations and num_samples <= 5000:
                 logging.info("Creating NC Figure 1 visualizations (Papyan et al., 2020 style)...")
                 vis_interval = getattr(config.visualization, 'vis_step_interval', 1000)
                 selected_epochs = [snap.epoch for snap in nc_analyzer.snapshots 
@@ -853,6 +990,8 @@ def main():
                     show_features=True,
                     fps=2.0
                 )
+            elif config.visualization.save_nc_visualizations:
+                logging.info(f"Skipping NC Figure 1 visualizations for large dataset ({num_samples} samples > 5000 threshold)")
             
             logging.info(f"Neural Collapse analysis saved ({len(nc_analyzer.snapshots)} snapshots)")
         

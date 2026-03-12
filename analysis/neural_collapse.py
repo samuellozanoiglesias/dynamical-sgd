@@ -29,6 +29,7 @@ Email: samuel.lozano@ucm.es
 """
 
 import logging
+import jax
 import jax.numpy as jnp
 import numpy as np
 import matplotlib.pyplot as plt
@@ -193,7 +194,17 @@ def compute_nc_metrics(H: jnp.ndarray, labels: jnp.ndarray, W: jnp.ndarray, b: O
     # Already weighted by π_c in the loop, no need to divide by C
     
     # NC1 Metric: Tr{W @ B^†} / C using Moore-Penrose pseudoinverse
-    B_pinv = jnp.linalg.pinv(Sigma_B)
+    try:
+        B_pinv = jnp.linalg.pinv(Sigma_B)
+    except ValueError as e:
+        if "RESOURCE_EXHAUSTED" in str(e):
+            # GPU out of memory, fallback to CPU computation
+            logging.warning("GPU memory exhausted for pinv, falling back to CPU")
+            Sigma_B_cpu = jax.device_put(Sigma_B, jax.devices('cpu')[0])
+            B_pinv_cpu = jnp.linalg.pinv(Sigma_B_cpu)
+            B_pinv = jax.device_put(B_pinv_cpu, jax.devices()[0])
+        else:
+            raise
     nc1_variability = jnp.trace(Sigma_W @ B_pinv) / C
     
     # =============================================================================
@@ -239,6 +250,11 @@ def compute_nc_metrics(H: jnp.ndarray, labels: jnp.ndarray, W: jnp.ndarray, b: O
         'nc3_self_duality': float(nc3_self_duality),
         # Fig 6: NC1 - Variability Collapse
         'nc1_variability': float(nc1_variability),
+        # Fundamental component norms - for understanding what drives the NC metrics
+        'fundamentals_mu_c_norm': float(jnp.mean(norms_means)),  # Average class-center norm
+        'fundamentals_mu_G_norm': float(jnp.linalg.norm(mu_G)),  # Global mean norm
+        'fundamentals_M_norm': float(jnp.linalg.norm(M, 'fro')),  # Centered class means matrix Frobenius norm
+        'fundamentals_W_norm': float(jnp.linalg.norm(W, 'fro')),  # Classifier weights Frobenius norm
     }
     
     # Fig 7: NC4 - Nearest Class-Center Mismatch (only if test data provided)
@@ -246,6 +262,75 @@ def compute_nc_metrics(H: jnp.ndarray, labels: jnp.ndarray, W: jnp.ndarray, b: O
         result['nc7_ncc_mismatch'] = nc4_ncc_mismatch  # Keep old key for backward compatibility
     
     return result
+
+
+def get_features_and_weights_batched(params: Any, X: jnp.ndarray, num_hidden_layers: int = 1, use_batchnorm: bool = True, use_bias: bool = True, batch_size: int = 5000) -> Tuple[jnp.ndarray, jnp.ndarray, Optional[jnp.ndarray]]:
+    """
+    Batched version of get_features_and_weights to avoid OOM on large datasets.
+    
+    Args:
+        params: Model parameters (list of layer params)
+        X: Input data (N, input_dim)
+        num_hidden_layers: Number of hidden layer blocks
+        use_batchnorm: Whether the model uses BatchNorm
+        use_bias: Whether the CLASSIFIER uses bias
+        batch_size: Batch size for processing
+        
+    Returns:
+        Tuple of (H, W, b):
+            - H: Last-layer features (N, p)
+            - W: Classifier weights (C, p)
+            - b: Classifier biases (C,) if use_bias=True, else None
+    """
+    num_samples = X.shape[0]
+    num_batches = (num_samples + batch_size - 1) // batch_size
+    features_list = []
+    
+    for i in range(num_batches):
+        start_idx = i * batch_size
+        end_idx = min((i + 1) * batch_size, num_samples)
+        X_batch = X[start_idx:end_idx]
+        
+        # Process this batch through the network (without the final classifier)
+        h = X_batch
+        
+        if use_batchnorm:
+            for block_idx in range(num_hidden_layers):
+                param_idx = block_idx * 2
+                W_dense, b_dense = params[param_idx]
+                h = jnp.dot(h, W_dense) + b_dense
+                
+                bn_params = params[param_idx + 1]
+                if len(bn_params) == 4:
+                    gamma, beta, running_mean, running_var = bn_params
+                    h = gamma * (h - running_mean) / jnp.sqrt(running_var + 1e-5) + beta
+                
+                h = jnp.maximum(0, h)
+        else:
+            for block_idx in range(num_hidden_layers):
+                W_dense, b_dense = params[block_idx * 2]
+                h = jnp.dot(h, W_dense) + b_dense
+                h = jnp.maximum(0, h)
+        
+        features_list.append(h)
+    
+    # Concatenate all batch features
+    H = jnp.concatenate(features_list, axis=0)
+    
+    # Extract classifier weights (same for all batches)
+    classifier_idx = num_hidden_layers * 3 if use_batchnorm else num_hidden_layers * 2
+    classifier_params = params[classifier_idx]
+    
+    if use_bias:
+        W_last, b_last = classifier_params
+        W = W_last.T  # (C, p)
+        b = b_last    # (C,)
+    else:
+        W_last = classifier_params[0] if isinstance(classifier_params, tuple) else classifier_params
+        W = W_last.T  # (C, p)
+        b = None
+    
+    return H, W, b
 
 
 def get_features_and_weights(params: Any, X: jnp.ndarray, num_hidden_layers: int = 1, use_batchnorm: bool = True, use_bias: bool = True) -> Tuple[jnp.ndarray, jnp.ndarray, Optional[jnp.ndarray]]:
@@ -270,6 +355,10 @@ def get_features_and_weights(params: Any, X: jnp.ndarray, num_hidden_layers: int
             - W: Classifier weights (C, p)
             - b: Classifier biases (C,) if use_bias=True, else None
     """
+    # For large datasets, process in batches to avoid OOM
+    if X.shape[0] > 10000:
+        return get_features_and_weights_batched(params, X, num_hidden_layers, use_batchnorm, use_bias, batch_size=5000)
+    
     # Extract features from all hidden layer blocks
     h = X
     
@@ -390,7 +479,7 @@ class NeuralCollapseAnalyzer:
     Simplified Neural Collapse analyzer using paper's metric definitions.
     """
     
-    def __init__(self, num_classes: int, feature_dim: int, num_hidden_layers: int = 1, use_batchnorm: bool = True, use_bias: bool = True):
+    def __init__(self, num_classes: int, feature_dim: int, num_hidden_layers: int = 1, use_batchnorm: bool = True, use_bias: bool = True, classifier: Optional[Any] = None):
         """
         Initialize Neural Collapse analyzer.
         
@@ -401,12 +490,14 @@ class NeuralCollapseAnalyzer:
             use_batchnorm: Whether the model uses BatchNorm layers (default: True)
             use_bias: Whether the CLASSIFIER uses bias (default: True)
                       Note: Hidden layers always use bias (standard architecture)
+            classifier: Optional classifier object (SpiralClassifier) for architecture-specific handling
         """
         self.num_classes = num_classes
         self.feature_dim = feature_dim
         self.num_hidden_layers = num_hidden_layers
         self.use_batchnorm = use_batchnorm
         self.use_bias = use_bias
+        self.classifier = classifier  # Store reference to classifier
         self.snapshots: List[NeuralCollapseSnapshot] = []
         
     def extract_features_and_classifiers(
@@ -425,11 +516,11 @@ class NeuralCollapseAnalyzer:
         Args:
             model_fn: Model function (not used, kept for compatibility)
             params: Current model parameters
-            X: Input data (N, input_dim)
+            X: Input data (N, input_dim) for MLP or (N, H, W, C) for DenseNet
             Y: One-hot labels (N, num_classes)
             epoch: Current training epoch
-            X_test: Test input data (N_test, input_dim) for NC7 computation (optional)
-            Y_test: Test one-hot labels (N_test, num_classes) for NC7 computation (optional)
+            X_test: Test input data for NC7 computation (optional)
+            Y_test: Test one-hot labels for NC7 computation (optional)
             
         Returns:
             NeuralCollapseSnapshot containing extracted information and metrics
@@ -437,15 +528,28 @@ class NeuralCollapseAnalyzer:
         # Convert one-hot labels to class indices
         labels = jnp.argmax(Y, axis=1)
         
-        # Extract features and weights using the new architecture
-        features, classifiers, biases = get_features_and_weights(params, X, self.num_hidden_layers, self.use_batchnorm, self.use_bias)
+        # Extract features and classifier weights
+        if self.classifier is not None:
+            # Use classifier object methods (works for both MLP and DenseNet)
+            features = self.classifier.get_features(params, X, is_training=False)
+            classifiers, biases = self.classifier.get_classifier_weights(params)
+        else:
+            # Fallback to stax-specific extraction
+            features, classifiers, biases = get_features_and_weights(
+                params, X, self.num_hidden_layers, self.use_batchnorm, self.use_bias
+            )
         
         # Extract test features if provided
         H_test = None
         labels_test = None
         if X_test is not None and Y_test is not None:
             labels_test = jnp.argmax(Y_test, axis=1)
-            H_test, _, _ = get_features_and_weights(params, X_test, self.num_hidden_layers, self.use_batchnorm, self.use_bias)
+            if self.classifier is not None:
+                H_test = self.classifier.get_features(params, X_test, is_training=False)
+            else:
+                H_test, _, _ = get_features_and_weights(
+                    params, X_test, self.num_hidden_layers, self.use_batchnorm, self.use_bias
+                )
         
         # Compute class means
         class_means = []
@@ -655,9 +759,14 @@ def plot_nc_metrics(metrics_history: List[Tuple[int, dict]], output_dir: Path, l
     # Fig 7: NCC Mismatch (if available)
     nc4 = [m[1].get('nc7_ncc_mismatch', None) for m in metrics_history]  # Use old key for compatibility
     has_nc4 = all(v is not None for v in nc4)
+    # Fundamental Components (NEW)
+    mu_c_norms = [m[1]['fundamentals_mu_c_norm'] for m in metrics_history]
+    mu_G_norms = [m[1]['fundamentals_mu_G_norm'] for m in metrics_history]
+    M_norms = [m[1]['fundamentals_M_norm'] for m in metrics_history]
+    W_norms = [m[1]['fundamentals_W_norm'] for m in metrics_history]
     
-    # Create figure with 2x3 subplots
-    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    # Create figure with 3x3 subplots to accommodate fundamental components plot
+    fig, axes = plt.subplots(3, 3, figsize=(21, 15))
     
     # Figure 2: NC2 - Equinorm (CV) - BOTH means and classifiers
     ax = axes[0, 0]
@@ -751,6 +860,23 @@ def plot_nc_metrics(metrics_history: List[Tuple[int, dict]], output_dir: Path, l
         ax.text(0.5, 0.5, 'NC4: Nearest Class-Center\n(requires test data)', 
                 ha='center', va='center', fontsize=11, color='gray')
     
+    # NEW: Fundamental Components Norms Evolution
+    ax = axes[2, 0]
+    ax.plot(epochs, mu_c_norms, 'o-', linewidth=2, markersize=6, color='#2E86AB', label='⟨‖μ_c - μ_G‖⟩')  # Avg class-center norm
+    ax.plot(epochs, mu_G_norms, 's-', linewidth=2, markersize=6, color='#F18F01', label='‖μ_G‖')          # Global mean norm
+    ax.plot(epochs, M_norms, '^-', linewidth=2, markersize=6, color='#D62246', label='‖M‖_F')            # Matrix M Frobenius norm
+    ax.plot(epochs, W_norms, 'v-', linewidth=2, markersize=6, color='#A23B72', label='‖W‖_F')            # Classifier weights Frobenius norm
+    ax.set_xlabel('Epoch', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Component Norms', fontsize=12, fontweight='bold')
+    ax.set_title('Fundamental Components Evolution\nNorms of μ_c, μ_G, M, W', 
+                 fontsize=13, fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=10, loc='best')
+    
+    # Hide unused subplots
+    axes[2, 1].axis('off')
+    axes[2, 2].axis('off')
+    
     # Add vertical line at TPT accuracy threshold step (Terminal Phase Training)
     if step_100_acc is not None:
         tpt_label = f'{tpt_threshold*100:.0f}% Train Acc' if tpt_threshold < 1.0 else '100% Train Acc'
@@ -762,10 +888,10 @@ def plot_nc_metrics(metrics_history: List[Tuple[int, dict]], output_dir: Path, l
                        tpt_label, rotation=90, verticalalignment='top',
                        fontsize=10, color='black', fontweight='bold')
     
-    plt.suptitle('Neural Collapse Metrics Evolution', fontsize=16, fontweight='bold', y=0.995)
+    plt.suptitle('Neural Collapse Metrics Evolution + Fundamental Components', fontsize=16, fontweight='bold', y=0.995)
     plt.tight_layout()
     
-    save_path = output_dir / 'nc_metrics_paper_style.png'
+    save_path = output_dir / 'nc_metrics_evolution.png'
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    print(f"✅ Saved Neural Collapse metrics plot to {save_path}")
+    print(f"✅ Saved Neural Collapse metrics plot with fundamental components to {save_path}")
     plt.close()

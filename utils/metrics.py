@@ -76,6 +76,93 @@ def classification_accuracy(
     return jnp.mean(predicted_classes == true_classes)
 
 
+def cross_entropy_loss_batched(
+    model_fn: Any,
+    params: Any,
+    X: jnp.ndarray,
+    Y: jnp.ndarray,
+    l2_reg: float = 0.0,
+    batch_size: int = 1000
+) -> float:
+    """
+    Compute cross-entropy loss in batches to avoid OOM on large datasets.
+    
+    Args:
+        model_fn: Model function
+        params: Model parameters
+        X: Input features
+        Y: One-hot encoded labels
+        l2_reg: L2 regularization coefficient
+        batch_size: Batch size for computing loss
+        
+    Returns:
+        Average loss value
+    """
+    num_samples = X.shape[0]
+    total_loss = 0.0
+    num_batches = (num_samples + batch_size - 1) // batch_size
+    
+    for i in range(num_batches):
+        start_idx = i * batch_size
+        end_idx = min((i + 1) * batch_size, num_samples)
+        X_batch = X[start_idx:end_idx]
+        Y_batch = Y[start_idx:end_idx]
+        
+        # Compute loss for this batch (without l2_reg to avoid counting it multiple times)
+        batch_loss = cross_entropy_loss(model_fn, params, X_batch, Y_batch, l2_reg=0.0)
+        total_loss += float(batch_loss) * (end_idx - start_idx)
+    
+    # Average loss across all samples
+    avg_loss = total_loss / num_samples
+    
+    # Add L2 regularization once (not per batch)
+    if l2_reg > 0.0:
+        l2_penalty = sum(
+            jnp.sum(param ** 2) 
+            for param in jax.tree_util.tree_leaves(params)
+        )
+        avg_loss = avg_loss + l2_reg * float(l2_penalty)
+    
+    return avg_loss
+
+
+def classification_accuracy_batched(
+    model_fn: Any,
+    params: Any,
+    X: jnp.ndarray,
+    Y: jnp.ndarray,
+    batch_size: int = 1000
+) -> float:
+    """
+    Compute classification accuracy in batches to avoid OOM on large datasets.
+    
+    Args:
+        model_fn: Model function
+        params: Model parameters
+        X: Input features
+        Y: One-hot encoded labels
+        batch_size: Batch size for computing accuracy
+        
+    Returns:
+        Overall accuracy (fraction of correct predictions)
+    """
+    num_samples = X.shape[0]
+    correct_predictions = 0
+    num_batches = (num_samples + batch_size - 1) // batch_size
+    
+    for i in range(num_batches):
+        start_idx = i * batch_size
+        end_idx = min((i + 1) * batch_size, num_samples)
+        X_batch = X[start_idx:end_idx]
+        Y_batch = Y[start_idx:end_idx]
+        
+        # Compute accuracy for this batch
+        batch_acc = classification_accuracy(model_fn, params, X_batch, Y_batch)
+        correct_predictions += float(batch_acc) * (end_idx - start_idx)
+    
+    return correct_predictions / num_samples
+
+
 def compute_per_class_accuracy(
     model_fn: Any,
     params: Any,
@@ -322,7 +409,7 @@ class MetricsTracker:
     Class for tracking multiple metrics during training.
     """
     
-    def __init__(self, track_calibration: bool = False, track_per_class: bool = False, num_classes: Optional[int] = None):
+    def __init__(self, track_calibration: bool = False, track_per_class: bool = False, num_classes: Optional[int] = None, eval_batch_size: int = 1000):
         """
         Initialize metrics tracker.
         
@@ -330,10 +417,12 @@ class MetricsTracker:
             track_calibration: Whether to track calibration metrics
             track_per_class: Whether to track per-class accuracy and loss metrics
             num_classes: Number of classes (required if track_per_class=True)
+            eval_batch_size: Batch size for computing metrics on large datasets (to avoid OOM)
         """
         self.track_calibration = track_calibration
         self.track_per_class = track_per_class
         self.num_classes = num_classes
+        self.eval_batch_size = eval_batch_size
         self.metrics_history = {}
         self.step = 0
         
@@ -372,21 +461,21 @@ class MetricsTracker:
         # Ensure l2_reg is a float, not a string
         l2_reg_float = float(l2_reg) if l2_reg is not None else 0.0
         
-        # Training metrics
+        # Training metrics - use batched versions for large datasets
         current_metrics['train_loss'] = float(
-            cross_entropy_loss(model_fn, params, X_train, Y_train, l2_reg_float)
+            cross_entropy_loss_batched(model_fn, params, X_train, Y_train, l2_reg_float, batch_size=self.eval_batch_size)
         )
         current_metrics['train_accuracy'] = float(
-            classification_accuracy(model_fn, params, X_train, Y_train)
+            classification_accuracy_batched(model_fn, params, X_train, Y_train, batch_size=self.eval_batch_size)
         )
         
-        # Test metrics
+        # Test metrics - use batched versions for large datasets
         if X_test is not None and Y_test is not None:
             current_metrics['test_loss'] = float(
-                cross_entropy_loss(model_fn, params, X_test, Y_test, l2_reg_float)
+                cross_entropy_loss_batched(model_fn, params, X_test, Y_test, l2_reg_float, batch_size=self.eval_batch_size)
             )
             current_metrics['test_accuracy'] = float(
-                classification_accuracy(model_fn, params, X_test, Y_test)
+                classification_accuracy_batched(model_fn, params, X_test, Y_test, batch_size=self.eval_batch_size)
             )
         
         # Per-class metrics

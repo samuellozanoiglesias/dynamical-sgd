@@ -1,0 +1,109 @@
+# Neural Collapse MNIST Experiment Configuration  
+# Replicates the reference MNIST Neural Collapse setup using DenseNet-40
+# Following Papyan et al. (2020) Neural Collapse paper architecture and hyperparameters
+
+# Dataset configuration
+data:
+  dataset_name: "mnist"  # "spiral" or "mnist"
+  
+  # MNIST-specific parameters
+  data_dir: "./data"
+  flatten: false         # Keep as 28x28 images for DenseNet-40 (CNN architecture)
+  normalize: true        # Apply standard MNIST normalization (mean=0.1307, std=0.3081)
+  download: true         # Download MNIST if not present
+  
+  # For spiral compatibility (ignored for MNIST)
+  points_per_class: null 
+  num_classes: 10        # MNIST has 10 classes (0-9)
+  test_ratio: null       # MNIST uses standard train/test split (60k/10k)
+  random_seed: 0
+
+# Model architecture - DenseNet-40 for MNIST (Neural Collapse Paper)
+model:
+  architecture: "densenet40"  # "mlp" or "densenet40"
+  
+  # DenseNet-40 specific parameters
+  growth_rate: 12        # Number of feature maps per layer (standard for MNIST)
+  compression: 0.5       # Compression factor in transition layers
+  dropout_rate: 0.0      # Dropout disabled as specified
+  use_bias: true         # Enable bias in classifier for bias-agnostic NC analysis
+  
+  # MLP parameters (unused for DenseNet-40, kept for compatibility)
+  input_dim: 784         # Ignored when using DenseNet-40
+  nn_width: 200          # Ignored when using DenseNet-40
+  num_hidden_layers: 2   # Ignored when using DenseNet-40
+  activation: "relu"     # Ignored when using DenseNet-40
+  use_batchnorm: false   # DenseNet-40 has BatchNorm built-in
+
+# Training configuration - Standard Neural Collapse setup for MNIST
+training:
+  total_steps: 150000    # ~320 epochs (469 steps/epoch * 320 ≈ 150,000)
+                         # Neural Collapse typically emerges after ~200 epochs
+  batch_size: 128        # Standard batch size for MNIST DenseNet-40
+  validation_interval: 500  # Validate every 500 steps (~1 epoch)
+
+# Optimizer configuration - SGD with momentum (standard for Neural Collapse papers)
+optimizer:
+  optimizer_type: "sgd"  # SGD is standard for Neural Collapse experiments
+  learning_rate: 0.1     # Standard learning rate for DenseNet-40 on MNIST
+  momentum: 0.9          # Standard momentum for DenseNet
+  l2_reg: 1e-4           # Weight decay matching reference Neural Collapse papers
+
+# Dynamic class focus (bumping) configuration
+dynamics:
+  bumps_before_TPT: true   # Apply bumps before reaching TPT accuracy threshold
+  bumps_at_TPT: false      # Apply bumps during/after reaching TPT accuracy threshold
+  period_length: 2000      # Period for cycling through classes (~4 epochs)
+  w_max: 50                # Weight amplitude for class focusing
+  tpt_accuracy_threshold: 0.99  # 99% accuracy triggers Terminal Phase Training
+
+# Analysis configuration
+analysis:
+  track_weight_diff: false
+  weight_diff_step_interval: 500    # Tracking interval (~1 epoch)
+  track_neural_collapse: true       # ENABLE Neural Collapse tracking
+  nc_snapshot_interval: 500         # Snapshot every ~1 epoch (150000÷500 = 300 snapshots)
+
+# Visualization configuration
+visualization:
+  real_time_visualization: false  # Disable for MNIST (no 2D visualization) 
+  vis_step_interval: 1000         # Visualization updates every ~2 epochs
+  plot_style: "seaborn-v0_8-darkgrid"
+  figure_dpi: 300
+  save_decision_boundaries: false  # Not applicable for high-dim MNIST
+  save_training_curves: true
+  save_nc_visualizations: true    # Save NC metric plots
+
+# Output configuration
+output:
+  output_dir: "outputs"  # Base directory (experiment subfolders created automatically)
+  experiment_name: "nc_mnist_densenet40"  # Overridden by run_nc_experiment.py
+  save_metrics: true
+  save_final_model: true
+  save_checkpoints: false
+  checkpoint_interval: 5000      # Checkpoints every ~10 epochs
+
+# Device configuration
+device: "auto"  # "auto", "gpu", or "cpu"
+random_seed: 42
+
+# Expected Neural Collapse behavior for MNIST with DenseNet-40:
+# Terminal Phase Training (TPT) typically begins after ~200 epochs (>95% test accuracy)
+# 
+# - NC1 (Variability Collapse): Should collapse to ~0 in TPT (within-class variation → 0)
+# - NC2-Equinorm (Equal Norms): CV should approach 0 (all class centers equidistant from global mean)
+# - NC2-Equiangularity: Target angle = -1/(C-1) = -1/9 ≈ -0.111 (for C=10 classes)
+#                        Corresponding geometric angle: arccos(-1/9) ≈ 96.4°
+# - NC3 (Self-Duality): ||Ŵ^T - M̂|| → 0 (classifiers align with class means)
+# - NC4 (NCC Mismatch): → 0 (classifier predictions = nearest class center predictions)
+#
+# Reference: Papyan et al. (2020) "Prevalence of Neural Collapse during the terminal 
+# phase of deep learning training"
+#
+# DenseNet-40 Architecture:
+# - 3 dense blocks with 12 layers each (36 layers total)
+# - 2 transition layers (compression=0.5)
+# - Initial convolution (16 filters)
+# - Final global pooling + classifier
+# - Growth rate k=12, Dropout=0.0
+# - Total parameters: ~300K for MNIST

@@ -13,6 +13,37 @@ import jax.numpy as jnp
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 from matplotlib.gridspec import GridSpec
+from matplotlib.colors import ListedColormap
+import matplotlib.cm as cm
+from typing import List, Tuple, Any
+
+
+def generate_class_colors(num_classes: int, colormap: str = 'tab10', alpha: float = 1.0) -> List[str]:
+    """
+    Generate distinct colors for any number of classes.
+    
+    Args:
+        num_classes: Number of classes to generate colors for
+        colormap: Matplotlib colormap name (tab10, Set3, viridis, etc.)
+        alpha: Alpha transparency value (currently not used, colors returned as hex)
+        
+    Returns:
+        List of color strings
+    """
+    if num_classes <= 10:
+        # Use tab10 for up to 10 classes (gives nice distinct colors)
+        cmap = cm.get_cmap('tab10')
+        colors = [cmap(i) for i in range(num_classes)]
+    else:
+        # For more classes, use a continuous colormap
+        cmap = cm.get_cmap(colormap)
+        colors = [cmap(i / num_classes) for i in range(num_classes)]
+    
+    # Convert to hex strings
+    from matplotlib.colors import to_hex
+    return [to_hex(color) for color in colors]
+
+
 from pathlib import Path
 from typing import Any, List, Tuple, Optional, Dict
 import jax
@@ -39,7 +70,7 @@ def plot_spiral_dataset(
         colors: List of colors for each class
     """
     if colors is None:
-        colors = ['#8B0000', '#00008B', '#FFD700']  # Dark red, dark blue, gold
+        colors = generate_class_colors(Y.shape[1])  # Generate colors for actual number of classes
     
     plt.figure(figsize=figsize)
     
@@ -113,12 +144,13 @@ def plot_decision_boundary(
     plt.figure(figsize=figsize)
     
     # Plot decision boundary
-    colors = ['#FFB6C1', '#ADD8E6', '#FFFFE0']  # Light colors for regions
-    plt.contourf(xx, yy, Z, alpha=0.6, levels=[-0.5, 0.5, 1.5, 2.5], colors=colors)
+    num_classes = Y_train.shape[1]
+    region_colors = generate_class_colors(num_classes)  # Light colors for regions
+    plt.contourf(xx, yy, Z, alpha=0.6, levels=np.arange(-0.5, num_classes, 1), colors=region_colors)
     
     # Plot training data
     train_labels = np.argmax(Y_train, axis=1)
-    train_colors = ['#8B0000', '#00008B', '#FFD700']  # Darker colors for points
+    train_colors = generate_class_colors(num_classes)  # Darker colors for points
     
     for class_idx in range(Y_train.shape[1]):
         mask = train_labels == class_idx
@@ -135,7 +167,7 @@ def plot_decision_boundary(
     # Plot test data if provided
     if X_test is not None and Y_test is not None:
         test_labels = np.argmax(Y_test, axis=1)
-        test_colors = ['#FF6347', '#1E90FF', '#FFD700']  # Tomato, dodger blue, gold
+        test_colors = generate_class_colors(num_classes)  # Test colors
         
         for class_idx in range(Y_test.shape[1]):
             mask = test_labels == class_idx
@@ -538,7 +570,7 @@ def plot_class_focus_dynamics(
         figsize: Figure size
     """
     if colors is None:
-        colors = ['red', 'blue', 'gold']
+        colors = generate_class_colors(num_classes)  # Generate colors for actual number of classes
     
     plt.figure(figsize=figsize)
     

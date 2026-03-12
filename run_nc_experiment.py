@@ -3,18 +3,18 @@
 Run Neural Collapse experiments with three different bumping configurations.
 
 This script can run experiments with:
-  - with_bumps_TPT: Bumping continues after reaching 100% training accuracy
-  - without_bumps_TPT: Bumping stops after reaching 100% training accuracy  
-  - without_dynamics: No bumping at all (standard training)
-  - with_dynamics: Both with_bumps_TPT and without_bumps_TPT (compare TPT behavior)
-  - all: Run all three experiments for comparison
+  - always: Bumping continues throughout training (including after 100% accuracy)
+  - tpt_only: Bumping only during Terminal Phase Training (after reaching 100% accuracy)
+  - pre_tpt: Bumping only before Terminal Phase Training (stops at 100% accuracy)  
+  - never: No bumping at all (standard training)
+  - all: Run all four experiments for comparison
 
 Usage:
     python run_nc_experiment.py --cluster brigit --mode all
-    python run_nc_experiment.py --cluster cuenca --mode with_bumps_TPT
-    python run_nc_experiment.py --cluster brigit --mode without_bumps_TPT
-    python run_nc_experiment.py --cluster brigit --mode without_dynamics
-    python run_nc_experiment.py --cluster brigit --mode with_dynamics
+    python run_nc_experiment.py --cluster cuenca --mode always
+    python run_nc_experiment.py --cluster brigit --mode tpt_only
+    python run_nc_experiment.py --cluster brigit --mode pre_tpt
+    python run_nc_experiment.py --cluster brigit --mode never
 """
 
 import argparse
@@ -40,8 +40,8 @@ def main():
         '--mode',
         type=str,
         default='all',
-        choices=['with_bumps_TPT', 'without_bumps_TPT', 'without_dynamics', 'with_dynamics', 'all'],
-        help='Which experiment to run: with_bumps_TPT (bumps continue after 100%%), without_bumps_TPT (bumps stop at 100%%), without_dynamics (no bumps), with_dynamics (both TPT modes), or all (run all three)'
+        choices=['always', 'tpt_only', 'pre_tpt', 'never', 'all'],
+        help='Which experiment to run: always (bumps throughout), tpt_only (bumps only after 100%%), pre_tpt (bumps stop at 100%%), never (no bumps), or all (run all four)'
     )
 
     parser.add_argument(
@@ -100,14 +100,15 @@ def main():
     print()
     
     experiments = []
-    
-    # Use single config file, just override enable_dynamics and bumps_TPT
-    if args.mode in ['with_bumps_TPT', 'with_dynamics', 'all']:
+
+    # Use single config file, just override the two bump parameters
+    if args.mode in ['never', 'all']:
+        # NEVER: No bumps at all
         overrides = [
             f'output.output_dir={output_base}',
-            'dynamics.enable_dynamics=true',
-            'dynamics.bumps_TPT=true',
-            'output.experiment_name=nc_with_bumps_TPT',
+            'dynamics.bumps_before_TPT=false',
+            'dynamics.bumps_at_TPT=false',
+            'output.experiment_name=nc_never',
             f'output.config_name={config_name}',
             f'output.experiment_timestamp={experiment_timestamp}'
         ]
@@ -116,17 +117,18 @@ def main():
             overrides.append(f'data.random_seed={args.seed}')
         
         experiments.append({
-            'name': 'WITH Bumps Through Terminal Phase Training (bumps_TPT=true)',
+            'name': 'NEVER: No Bumps (Standard Training)',
             'config': args.config_file,
             'overrides': overrides
         })
     
-    if args.mode in ['without_bumps_TPT', 'with_dynamics', 'all']:
+    if args.mode in ['pre_tpt', 'all']:
+        # PRE_TPT: Bumps only before TPT (stops when reaching 100% accuracy)
         overrides = [
             f'output.output_dir={output_base}',
-            'dynamics.enable_dynamics=true',
-            'dynamics.bumps_TPT=false',
-            'output.experiment_name=nc_without_bumps_TPT',
+            'dynamics.bumps_before_TPT=true',
+            'dynamics.bumps_at_TPT=false',
+            'output.experiment_name=nc_pre_tpt',
             f'output.config_name={config_name}',
             f'output.experiment_timestamp={experiment_timestamp}'
         ]
@@ -135,16 +137,18 @@ def main():
             overrides.append(f'data.random_seed={args.seed}')
         
         experiments.append({
-            'name': 'WITHOUT Bumps after Terminal Phase Training (bumps_TPT=false)',
+            'name': 'PRE_TPT: Bumps Only Before Terminal Phase Training (stops at 100% accuracy)',
             'config': args.config_file,
             'overrides': overrides
         })
     
-    if args.mode in ['without_dynamics', 'all']:
+    if args.mode in ['tpt_only', 'all']:
+        # TPT_ONLY: Bumps only during Terminal Phase Training (after reaching 100% accuracy)
         overrides = [
             f'output.output_dir={output_base}',
-            'dynamics.enable_dynamics=false',
-            'output.experiment_name=nc_without_dynamics',
+            'dynamics.bumps_before_TPT=false',
+            'dynamics.bumps_at_TPT=true',
+            'output.experiment_name=nc_tpt_only',
             f'output.config_name={config_name}',
             f'output.experiment_timestamp={experiment_timestamp}'
         ]
@@ -153,7 +157,27 @@ def main():
             overrides.append(f'data.random_seed={args.seed}')
         
         experiments.append({
-            'name': 'WITHOUT Dynamic Class Focus (Standard Training)',
+            'name': 'TPT_ONLY: Bumps Only During Terminal Phase Training (after 100% accuracy)',
+            'config': args.config_file,
+            'overrides': overrides
+        })
+    
+    if args.mode in ['always', 'all']:
+        # ALWAYS: Bumps throughout (before AND during/after TPT)
+        overrides = [
+            f'output.output_dir={output_base}',
+            'dynamics.bumps_before_TPT=true',
+            'dynamics.bumps_at_TPT=true',
+            'output.experiment_name=nc_always',
+            f'output.config_name={config_name}',
+            f'output.experiment_timestamp={experiment_timestamp}'
+        ]
+        if args.seed is not None:
+            overrides.append(f'training.random_seed={args.seed}')
+            overrides.append(f'data.random_seed={args.seed}')
+        
+        experiments.append({
+            'name': 'ALWAYS: Bumps Throughout Training (before AND during/after TPT)',
             'config': args.config_file,
             'overrides': overrides
         })
@@ -193,12 +217,14 @@ def main():
     print()
     print("Results saved to:")
     
-    if args.mode in ['with_bumps_TPT', 'with_dynamics', 'all']:
-        print(f"  - {output_base}/nc_with_bumps_TPT/{config_name}/experiment_{experiment_timestamp}/")
-    if args.mode in ['without_bumps_TPT', 'with_dynamics', 'all']:
-        print(f"  - {output_base}/nc_without_bumps_TPT/{config_name}/experiment_{experiment_timestamp}/")
-    if args.mode in ['without_dynamics', 'all']:
-        print(f"  - {output_base}/nc_without_dynamics/{config_name}/experiment_{experiment_timestamp}/")
+    if args.mode in ['always', 'all']:
+        print(f"  - {output_base}/nc_always/{config_name}/experiment_{experiment_timestamp}/")
+    if args.mode in ['tpt_only', 'all']:
+        print(f"  - {output_base}/nc_tpt_only/{config_name}/experiment_{experiment_timestamp}/")
+    if args.mode in ['pre_tpt', 'all']:
+        print(f"  - {output_base}/nc_pre_tpt/{config_name}/experiment_{experiment_timestamp}/")
+    if args.mode in ['never', 'all']:
+        print(f"  - {output_base}/nc_never/{config_name}/experiment_{experiment_timestamp}/")
     
     print()
     print("Compare the following:")
