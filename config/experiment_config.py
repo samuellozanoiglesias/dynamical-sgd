@@ -104,6 +104,7 @@ class TrainingConfig:
     
     total_steps: int = 75000
     batch_size: int = 50
+    eval_batch_size: int = 256
     validation_interval: int = 100
     checkpoint_interval: int = 1000
     early_stopping: bool = False
@@ -117,6 +118,7 @@ class AnalysisConfig:
     """Configuration for analysis and tracking."""
     
     track_weight_diff: bool = True
+    track_per_class: bool = True
     weight_diff_step_interval: int = 100
     track_gradients: bool = True
     gradient_tracking_interval: int = 10

@@ -1,0 +1,71 @@
+# Neural Collapse MNIST Experiment Configuration (MLP variant)
+# Uses a dense network before the classifier instead of ResNet-18.
+#
+# This configuration drives neuralcollapse_notebook.py via run_nc_experiment.py.
+
+# Dataset configuration
+data:
+  dataset_name: "mnist"
+  data_dir: "./data"
+  flatten: true
+  normalize: true
+  download: true
+  num_classes: 10
+  num_channels: 1
+  image_size: 28
+  random_seed: 0
+
+# Model architecture - MLP feature extractor + classifier
+model:
+  architecture: "mlp"      # Supported: "resnet18", "mlp"
+  num_classes: 10
+  use_bias: true            # Bias used in all dense layers and final classifier
+
+  # MLP-specific parameters
+  num_hidden_layers: 1      # N hidden layers before classifier
+  nn_width: 5000             # Width n for each hidden layer
+
+# Training configuration - MNIST (training-step based)
+training:
+  training_steps: 60000
+  steps_per_epoch: 200
+  batch_size: 128
+  eval_batch_size: 128
+
+# Optimizer configuration - SGD with momentum
+optimizer:
+  optimizer_type: "sgd"
+  learning_rate: 0.0679
+  momentum: 0.9
+  l2_reg: 5e-4
+
+# Dynamic class focus (bumping) configuration
+dynamics:
+  bumps_before_TPT: true
+  bumps_at_TPT: false
+  period_length: 1000
+  w_max: 50.0
+  tpt_accuracy_threshold: 1.0
+
+# Analysis configuration
+analysis:
+  track_neural_collapse: true
+
+# Visualization configuration
+visualization:
+  save_training_curves: true
+  save_nc_visualizations: true
+  save_sample_visualizations: true
+  figure_dpi: 150
+
+# Output configuration
+output:
+  output_dir: "outputs"
+  experiment_name: "nc_mnist_mlp"
+  save_metrics: true
+  save_final_model: false
+  save_checkpoints: false
+
+# Device configuration
+device: "auto"
+random_seed: 42

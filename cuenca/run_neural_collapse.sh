@@ -1,29 +1,29 @@
 #!/bin/bash
 # ============================================================================
-# Neural Collapse Batch Experiment Runner (Enhanced)
+# Neural Collapse MNIST Experiment Runner
 # ============================================================================
-# This script runs neural collapse experiments with multiple random seeds
-# for statistical analysis. Supports both spiral and MNIST datasets with
-# all possible configurations.
+# Runs neural collapse experiments on MNIST with ResNet-18 architecture
+# Supports multiple dynamic bumping modes for comparison.
 #
 # Usage:
-#   ./run_neural_collapse.sh     # Run all four configs in sequence
+#   ./run_neural_collapse.sh     # Run all four dynamics modes for MNIST
 #
-# The script runs four specific configurations in order:
-#   1. MNIST dataset configuration
-#   2. Super big neural network configuration  
-#   3. Super big neural network (revoluted) configuration
-#   4. Baseline spiral configuration
+# This script runs MNIST configuration with four dynamics modes:
+#   1. never:    No bumping (standard training, no class focus)
+#   2. pre_tpt:  Bumping ends when reaching TPT accuracy threshold
+#   3. tpt_only: Bumping starts only at TPT accuracy threshold
+#   4. always:   Bumping throughout entire training
 #
-# Dynamics Modes (controlled by bumps_before_TPT and bumps_at_TPT):
-#   - always:   bumps_before_TPT=true,  bumps_at_TPT=true   (bump throughout)
-#   - pre_tpt:  bumps_before_TPT=true,  bumps_at_TPT=false  (stop at TPT)
-#   - tpt_only: bumps_before_TPT=false, bumps_at_TPT=true   (start at TPT)
-#   - never:    bumps_before_TPT=false, bumps_at_TPT=false  (no bumps)
+# Dynamics Mode Controls (bumps_before_TPT / bumps_at_TPT):
+#   - never:    false / false  (standard SGD, no dynamics)
+#   - pre_tpt:  true / false   (stop at TPT accuracy)
+#   - tpt_only: false / true   (start at TPT accuracy)
+#   - always:   true / true    (continuous throughout)
 #
-# Expected Neural Collapse behavior comparison:
-#   Spiral (3 classes):  Target angle = -0.5   (120° between class centers)
-#   MNIST (10 classes):  Target angle = -0.111 (83.6° between class centers)
+# Expected Neural Collapse behavior for MNIST (10 classes, ResNet-18):
+#   Target equiangular angle: -0.111 (83.6° between class centers)
+#   TPT emergence: ~2500-3500 training steps (roughly 5-7 epochs, 99% accuracy threshold)
+#   NC metrics: Activation collapse, equinorm, equiangularity, self-duality
 # ============================================================================
 
 # ============================================================================
@@ -48,79 +48,91 @@ echo "Working from project root: $(pwd)"
 
 # Experiment configuration
 CLUSTER="cuenca"
-MODE="all"  # Run all dynamics modes: always, pre_tpt, tpt_only, never
+MODE="tpt_only"  # Run all dynamics modes: always, pre_tpt, tpt_only, never
 
 # Single seed for each config
 SEED=42
 
-# Four configurations to run in sequence
-CONFIGS=("nc_config_mnist.yaml" "nc_config_baseline.yaml")
-CONFIG_NAMES=("mnist" "baseline")
+# MNIST configuration
+CONFIG="nc_config_mnist_mlp.yaml"
+CONFIG_NAME="mnist_mlp"
+    
+get_training_cfg_value() {
+    local key="$1"
+    local config_path="config/$CONFIG"
+    awk -v key="$key" '
+        /^training:/ {in_training=1; next}
+        in_training && /^[^[:space:]]/ {in_training=0}
+        in_training && $1 == key":" {
+            val=$2
+            gsub(/"/, "", val)
+            print val
+            exit
+        }
+    ' "$config_path"
+}
 
 # ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
 
-run_config_experiment() {
-    local config_name=$1
-    local config_file=$2
-    
+run_mnist_experiment() {
+    local training_steps
+    local steps_per_epoch
+    local derived_epochs
+
+    training_steps="$(get_training_cfg_value training_steps)"
+    steps_per_epoch="$(get_training_cfg_value steps_per_epoch)"
+
+    if [[ -z "$training_steps" || -z "$steps_per_epoch" ]]; then
+        echo "Error: Could not read training.training_steps or training.steps_per_epoch from config/$CONFIG"
+        exit 1
+    fi
+
+    derived_epochs=$(( (training_steps + steps_per_epoch - 1) / steps_per_epoch ))
+
     echo ""
     echo "######################################################################"
-    echo "STARTING $config_name EXPERIMENT"  
+    echo "STARTING MNIST NEURAL COLLAPSE EXPERIMENTS"  
     echo "######################################################################"
-    echo "Configuration name: $config_name"
-    echo "Configuration file: $config_file"
-    echo "Mode: $MODE (all dynamics modes)"
+    echo "Configuration: MNIST with different architectures and dynamics modes"
+    echo "Dynamics mode: $MODE"
     echo "Cluster: $CLUSTER"
     echo "Seed: $SEED"
     echo ""
     
-    # Display configuration details
-    echo "Configuration details for $config_name:"
-    if [ "$config_name" = "mnist" ]; then
-        echo "  - Dataset: MNIST (10 classes, 784-dim)"
-        echo "  - Target angle: -0.111 (83.6° between class centers)"
-        echo "  - Challenge: High-dimensional, complex data distribution"
-    elif [ "$config_name" = "super_big_nn" ]; then
-        echo "  - Dataset: Spiral with large neural network"
-        echo "  - Focus: Large capacity model behavior"
-    elif [ "$config_name" = "super_big_nn_revoluted" ]; then
-        echo "  - Dataset: Spiral with large neural network (alternative config)"
-        echo "  - Focus: Large capacity model with different parameters"
-    elif [ "$config_name" = "baseline" ]; then
-        echo "  - Dataset: Spiral (3 classes, 2-dim)"
-        echo "  - Target angle: -0.5 (120° between class centers)"
-        echo "  - Standard baseline configuration"
-    fi
+    echo "Configuration details:"
+    echo "  - Dataset: MNIST (10 classes, 28×28 grayscale images)"
+    echo "  - Training steps: $training_steps"
+    echo "  - Steps per epoch: $steps_per_epoch"
+    echo "  - Derived epochs: $derived_epochs"
+    echo "  - Batch size: 128"
+    echo "  - Optimizer: SGD with momentum=0.9, weight_decay=5e-4"
+    echo "  - Learning rate: 0.0679 (tuned for CrossEntropyLoss)"
+    echo "  - Target equiangular angle: -0.111 (83.6° between class centers)"
+    echo "  - TPT threshold: 100% accuracy (zero training error)"
     echo "######################################################################"
     echo ""
     
     echo "======================================================================"
-    echo "Running $config_name experiment with seed: $SEED"
+    echo "Running MNIST experiment with 4 dynamics modes (seed=$SEED)"
     echo "======================================================================"
     
     python run_nc_experiment.py \
         --cluster $CLUSTER \
         --mode $MODE \
-        --config_file $config_file \
+        --config_file $CONFIG \
         --seed $SEED
     
     # Check if the experiment succeeded
     if [ $? -ne 0 ]; then
         echo ""
-        echo "✗ ERROR: $config_name experiment failed!"
+        echo "✗ ERROR: MNIST experiment failed!"
         exit 1
     fi
     
     echo ""
-    echo "✓ Completed $config_name experiment"
-    echo ""
-    
-    echo ""
-    echo "######################################################################"
-    echo "✓ $config_name EXPERIMENT COMPLETED SUCCESSFULLY!"
-    echo "######################################################################"
+    echo "✓ Completed MNIST experiment"
     echo ""
 }
 
@@ -129,56 +141,51 @@ run_config_experiment() {
 # ============================================================================
 
 echo "========================================================================"
-echo "NEURAL COLLAPSE FOUR-CONFIG EXPERIMENT SUITE"
+echo "NEURAL COLLAPSE MNIST EXPERIMENT SUITE"
 echo "========================================================================"
-echo "Running 4 configurations in sequence:"
-echo "  1. MNIST dataset"
-echo "  2. Super big neural network"
-echo "  3. Super big neural network (revoluted)"
-echo "  4. Baseline spiral"
-echo "Total experiments: 4 configs × 4 dynamics modes = 16 total runs"
+echo "Running MNIST dataset with ResNet-18 architecture"
+echo "Total experiment runs: 4 dynamics modes (never, pre_tpt, tpt_only, always)"
 echo "Seed: $SEED"
 echo ""
-echo "This will generate Neural Collapse analysis comparing different:"
-echo "  1. Dataset types (MNIST vs spiral)"
-echo "  2. Network architectures (standard vs super big)"
-echo "  3. Configuration variations"
-echo "  4. Dynamics modes (bumping strategies)"
+echo "This will test Neural Collapse dynamics with different bumping strategies:"
+echo "  1. never:    Standard SGD training without class focus bumps"
+echo "  2. pre_tpt:  Dynamic class focusing before Terminal Phase Training"
+echo "  3. tpt_only: Dynamic class focusing only during Terminal Phase Training"
+echo "  4. always:   Continuous dynamic class focusing throughout training"
+echo ""
+echo "Results will show how class focus timing affects NC metric evolution"
 echo "========================================================================"
 
-# Execute experiments for each configuration
-for i in "${!CONFIGS[@]}"; do
-    run_config_experiment "${CONFIG_NAMES[$i]}" "${CONFIGS[$i]}"
-done
+# Execute MNIST experiment with all dynamics modes
+run_mnist_experiment
 
 echo ""
 echo "========================================================================"
-echo "🎉 ALL FOUR-CONFIG EXPERIMENTS COMPLETED SUCCESSFULLY! 🎉"
+echo "🎉 MNIST NEURAL COLLAPSE EXPERIMENT COMPLETED SUCCESSFULLY! 🎉"
 echo "========================================================================"
 echo ""
 echo "EXPERIMENT SUMMARY:"
-echo "  Configurations run: 4 (mnist, super_big_nn, super_big_nn_revoluted, baseline)"
+echo "  Dataset: MNIST (10 classes)"
+echo "  Architecture: ResNet-18"
 echo "  Seed used: $SEED"
-echo "  Total experiment runs: 16 (4 configs × 4 dynamics modes)"
+echo "  Total dynamics modes: 4"
 echo ""
 echo "RESULTS LOCATIONS:"
-echo "  📁 MNIST results:        outputs/nc_*/nc_config_mnist/experiment_*/"
-echo "  📁 Super big NN results: outputs/nc_*/nc_config_super_big_nn/experiment_*/"
-echo "  📁 Super big NN rev:     outputs/nc_*/nc_config_super_big_nn_false/experiment_*/"
-echo "  📁 Baseline results:     outputs/nc_*/nc_config_baseline/experiment_*/"
+echo "  📁 Output base: ./outputs/ (created by run_nc_experiment.py)"
+echo "  📁 Structure: outputs/nc_*/nc_config_mnist/experiment_*/results/"
 echo ""
-echo "KEY OUTPUT FILES FOR COMPARISON:"
-echo "  📊 nc_metrics_evolution.png - Main NC metrics over time"
-echo "  📈 training_curves.png - Loss and accuracy progression"  
-echo "  🎬 nc_evolution_*.mp4 - Animation videos (spiral configs only)"
-echo "  📋 results.txt - Final metrics summary"
-echo "  🔍 nc_snapshots.pkl - Raw data for further analysis"
+echo "KEY OUTPUT FILES:"
+echo "  📊 training_curves_epoch_*.png - Combined loss/accuracy curves (train vs test)"
+echo "  🔍 nc_results.csv - Complete NC metrics in CSV format"
+echo "  📋 training_dataset_samples.png - MNIST sample visualization"
+echo "  📊 dataset_statistics.png - Class distribution analysis"
+echo "  ⚙️  class_focus_dynamics.png - Weight dynamics during bumping"
 echo ""
 echo "ANALYSIS RECOMMENDATIONS:"
-echo "  1. Compare MNIST vs spiral NC metric convergence patterns"
-echo "  2. Analyze effect of network size (standard vs super big)"
-echo "  3. Compare dynamics modes across all configurations"
-echo "  4. Validate architectural effects on Neural Collapse behavior"
+echo "  1. Compare NC1 (activation collapse) convergence across modes"
+echo "  2. Analyze NC2 equiangularity approach to target angle (-0.111)"
+echo "  3. Study TPT emergence timing with different bumping schedules"
+echo "  4. Evaluate effectiveness of class focus for accelerating NC"
 echo ""
-echo "Next steps: Compare results across the four configurations!"
+echo "Next steps: Analyze NC metrics in nc_results.csv for each mode!"
 echo "========================================================================"

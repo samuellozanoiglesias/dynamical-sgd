@@ -479,7 +479,7 @@ class NeuralCollapseAnalyzer:
     Simplified Neural Collapse analyzer using paper's metric definitions.
     """
     
-    def __init__(self, num_classes: int, feature_dim: int, num_hidden_layers: int = 1, use_batchnorm: bool = True, use_bias: bool = True, classifier: Optional[Any] = None):
+    def __init__(self, num_classes: int, feature_dim: int, num_hidden_layers: int = 1, use_batchnorm: bool = True, use_bias: bool = True, classifier: Optional[Any] = None, feature_batch_size: int = 256):
         """
         Initialize Neural Collapse analyzer.
         
@@ -491,6 +491,7 @@ class NeuralCollapseAnalyzer:
             use_bias: Whether the CLASSIFIER uses bias (default: True)
                       Note: Hidden layers always use bias (standard architecture)
             classifier: Optional classifier object (SpiralClassifier) for architecture-specific handling
+            feature_batch_size: Batch size used for feature extraction on large datasets
         """
         self.num_classes = num_classes
         self.feature_dim = feature_dim
@@ -498,6 +499,7 @@ class NeuralCollapseAnalyzer:
         self.use_batchnorm = use_batchnorm
         self.use_bias = use_bias
         self.classifier = classifier  # Store reference to classifier
+        self.feature_batch_size = feature_batch_size
         self.snapshots: List[NeuralCollapseSnapshot] = []
         
     def extract_features_and_classifiers(
@@ -531,7 +533,11 @@ class NeuralCollapseAnalyzer:
         # Extract features and classifier weights
         if self.classifier is not None:
             # Use classifier object methods (works for both MLP and DenseNet)
-            features = self.classifier.get_features(params, X, is_training=False)
+            features = self.classifier.get_features_batched(
+                params,
+                X,
+                batch_size=self.feature_batch_size,
+            )
             classifiers, biases = self.classifier.get_classifier_weights(params)
         else:
             # Fallback to stax-specific extraction
@@ -545,7 +551,11 @@ class NeuralCollapseAnalyzer:
         if X_test is not None and Y_test is not None:
             labels_test = jnp.argmax(Y_test, axis=1)
             if self.classifier is not None:
-                H_test = self.classifier.get_features(params, X_test, is_training=False)
+                H_test = self.classifier.get_features_batched(
+                    params,
+                    X_test,
+                    batch_size=self.feature_batch_size,
+                )
             else:
                 H_test, _, _ = get_features_and_weights(
                     params, X_test, self.num_hidden_layers, self.use_batchnorm, self.use_bias

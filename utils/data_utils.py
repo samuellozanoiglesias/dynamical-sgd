@@ -242,18 +242,18 @@ def load_mnist_data(
     
     # Convert labels to one-hot encoding
     def to_one_hot(labels, num_classes=10):
-        one_hot = np.zeros((len(labels), num_classes))
+        one_hot = np.zeros((len(labels), num_classes), dtype=np.float32)
         one_hot[np.arange(len(labels)), labels] = 1
         return one_hot
     
     Y_train_onehot = to_one_hot(Y_train)
     Y_test_onehot = to_one_hot(Y_test)
     
-    # Convert to JAX arrays
-    X_train_jax = jax.device_put(jnp.array(X_train))
-    Y_train_jax = jax.device_put(jnp.array(Y_train_onehot))
-    X_test_jax = jax.device_put(jnp.array(X_test))
-    Y_test_jax = jax.device_put(jnp.array(Y_test_onehot))
+    # Convert to JAX arrays (avoid extra device_put copy here)
+    X_train_jax = jnp.asarray(X_train, dtype=jnp.float32)
+    Y_train_jax = jnp.asarray(Y_train_onehot, dtype=jnp.float32)
+    X_test_jax = jnp.asarray(X_test, dtype=jnp.float32)
+    Y_test_jax = jnp.asarray(Y_test_onehot, dtype=jnp.float32)
     
     return (X_train_jax, Y_train_jax), (X_test_jax, Y_test_jax)
 

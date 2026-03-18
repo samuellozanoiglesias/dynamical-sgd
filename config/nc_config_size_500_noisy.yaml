@@ -6,7 +6,7 @@
 data:
   points_per_class: 1000
   num_classes: 3
-  revolutions: 4.0
+  revolutions: 10.0
   noise_std: 0.25
   test_ratio: 0.25
   random_seed: 0

@@ -5,7 +5,7 @@
 # Data configuration
 data:
   points_per_class: 1000
-  num_classes: 3
+  num_classes: 10
   revolutions: 4.0
   noise_std: 0.1
   test_ratio: 0.25

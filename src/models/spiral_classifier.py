@@ -36,10 +36,16 @@ from .densenet import DenseNet40, calculate_densenet40_feature_dim
 from .mlp_layers import DenseNoBias, create_mlp_architecture
 
 # Configure JAX to use GPU if available
-try:
+def _gpu_available() -> bool:
+    try:
+        return jax.device_count('gpu') > 0
+    except RuntimeError:
+        return False
+
+if _gpu_available():
     jax.config.update('jax_platform_name', 'gpu')
     print("GPU configured for JAX")
-except:
+else:
     print("Using CPU for JAX (GPU not available)")
 
 
@@ -300,8 +306,12 @@ class SpiralClassifier:
             Features h(x) of shape (N, feature_dim)
         """
         if self.architecture == "densenet40":
-            # DenseNet40 using Flax
-            return self.model.apply(params, X, train=is_training, return_features=True)
+            # Avoid full-dataset feature extraction for MNIST-sized tensors.
+            if X.shape[0] > 2048:
+                return self.get_features_batched(params, X, batch_size=256)
+            # DenseNet40 using Flax - always use inference mode for feature extraction
+            # (we don't need to update batch_stats when just extracting features)
+            return self.model.apply(params, X, train=False, return_features=True)
         
         # MLP architecture
         h = X
@@ -344,8 +354,32 @@ class SpiralClassifier:
                 h = jnp.maximum(0, h)
         
         return h
+
+    def get_features_batched(self, params: Any, X: jnp.ndarray, batch_size: int = 256) -> jnp.ndarray:
+        """
+        Extract features in batches to reduce peak memory usage.
+
+        Args:
+            params: Model parameters
+            X: Input data
+            batch_size: Batch size used for feature extraction
+
+        Returns:
+            Features h(x) concatenated across all batches
+        """
+        if X.shape[0] <= batch_size:
+            return self.get_features(params, X, is_training=False)
+
+        num_samples = X.shape[0]
+        features = []
+        for start_idx in range(0, num_samples, batch_size):
+            end_idx = min(start_idx + batch_size, num_samples)
+            X_batch = X[start_idx:end_idx]
+            features.append(self.get_features(params, X_batch, is_training=False))
+
+        return jnp.concatenate(features, axis=0)
     
-    def predict(self, params: Any, X: jnp.ndarray, is_training: bool = False) -> jnp.ndarray:
+    def predict(self, params: Any, X: jnp.ndarray, is_training: bool = False) -> Union[jnp.ndarray, Tuple[jnp.ndarray, Any]]:
         """
         Make predictions using the model.
         
@@ -355,14 +389,36 @@ class SpiralClassifier:
             is_training: Whether in training mode (affects BatchNorm/Dropout)
             
         Returns:
-            Model predictions (logits)
+            Model predictions (logits), or (logits, updated_params) for DenseNet during training
         """
         if self.architecture == "densenet40":
-            return self.model.apply(params, X, train=is_training, return_features=False)
+            if is_training:
+                # During training, batch_stats need to be mutable
+                logits, new_model_state = self.model.apply(
+                    params, X, train=True, return_features=False,
+                    mutable=['batch_stats']
+                )
+                return logits, new_model_state
+            else:
+                # During inference, use frozen batch_stats
+                return self.model.apply(params, X, train=False, return_features=False)
         else:
             # MLP: use stax model
             return self.model[1](params, X)
     
+    @property
+    def forward_fn(self):
+        """
+        Return a unified callable (params, X) -> logits for inference.
+        
+        Works for both MLP (stax) and DenseNet40 (Flax) architectures.
+        Use this instead of classifier.model[1] to remain architecture-agnostic.
+        """
+        if self.architecture == "densenet40":
+            return lambda params, X: self.model.apply(params, X, train=False, return_features=False)
+        else:
+            return self.model[1]
+
     def get_classifier_weights(self, params: Any) -> Tuple[jnp.ndarray, Optional[jnp.ndarray]]:
         """
         Extract classifier weights W and biases b from the final layer.
@@ -509,21 +565,27 @@ class SpiralClassifier:
         # Normalize weights to sum to 1
         return weights / jnp.sum(weights)
     
-    @partial(jit, static_argnums=(0,))
-    def loss_fn(self, params: Any, X: jnp.ndarray, Y: jnp.ndarray) -> float:
+    def loss_fn(self, params: Any, X: jnp.ndarray, Y: jnp.ndarray) -> Union[float, Tuple[float, Any]]:
         """
         Compute cross-entropy loss for a batch of data.
         
         Args:
             params: Model parameters
-            X: Input features of shape (batch_size, 2)
+            X: Input features of shape (batch_size, input_dim)
             Y: One-hot encoded labels of shape (batch_size, num_classes)
             
         Returns:
-            Cross-entropy loss value
+            Cross-entropy loss value, or (loss, new_model_state) for DenseNet
         """
         # Forward pass
-        predictions = self.predict(params, X, is_training=True)
+        pred_result = self.predict(params, X, is_training=True)
+        
+        # Handle DenseNet which returns (predictions, new_state) during training
+        if self.architecture == "densenet40":
+            predictions, new_model_state = pred_result
+        else:
+            predictions = pred_result
+            new_model_state = None
         
         # Cross-entropy loss
         log_probs = jax.nn.log_softmax(predictions)
@@ -537,7 +599,10 @@ class SpiralClassifier:
             )
             loss += self.l2_reg * l2_penalty
         
-        return loss
+        if new_model_state is not None:
+            return loss, new_model_state
+        else:
+            return loss
     
     def accuracy(self, params: Any, X: jnp.ndarray, Y: jnp.ndarray, batch_size: int = 5000) -> float:
         """
@@ -565,6 +630,7 @@ class SpiralClassifier:
                 Y_batch = Y[start_idx:end_idx]
                 
                 predictions = self.predict(params, X_batch, is_training=False)
+                # predictions is just logits during inference
                 predicted_classes = jnp.argmax(predictions, axis=1)
                 true_classes = jnp.argmax(Y_batch, axis=1)
                 batch_acc = jnp.mean(predicted_classes == true_classes)
@@ -574,6 +640,7 @@ class SpiralClassifier:
         else:
             # For small datasets, compute directly
             predictions = self.predict(params, X, is_training=False)
+            # predictions is just logits during inference
             predicted_classes = jnp.argmax(predictions, axis=1)
             true_classes = jnp.argmax(Y, axis=1)
             return jnp.mean(predicted_classes == true_classes)
@@ -597,12 +664,28 @@ class SpiralClassifier:
         Returns:
             Tuple of (new_params, new_opt_state, gradients)
         """
-        # Compute gradients
-        grads = grad(self.loss_fn)(params, X_batch, Y_batch)
-        
-        # Update parameters
-        updates, new_opt_state = self.optimizer.update(grads, opt_state)
-        new_params = optax.apply_updates(params, updates)
+        if self.architecture == "densenet40":
+            # For DenseNet, handle batch_stats separately
+            def loss_fn_for_grad(params_dict):
+                loss, new_model_state = self.loss_fn(params_dict, X_batch, Y_batch)
+                return loss, new_model_state
+            
+            # Compute gradients and get new batch_stats
+            (loss_val, new_model_state), grads = jax.value_and_grad(loss_fn_for_grad, has_aux=True)(params)
+            
+            # Update parameters with gradients
+            updates, new_opt_state = self.optimizer.update(grads, opt_state)
+            new_params = optax.apply_updates(params, updates)
+            
+            # Merge updated batch_stats into params
+            new_params = {**new_params, **new_model_state}
+        else:
+            # For MLP, standard gradient computation
+            grads = grad(self.loss_fn)(params, X_batch, Y_batch)
+            
+            # Update parameters
+            updates, new_opt_state = self.optimizer.update(grads, opt_state)
+            new_params = optax.apply_updates(params, updates)
         
         # Track weight history if enabled
         if self.track_weight_diff:

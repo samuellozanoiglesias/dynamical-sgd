@@ -481,8 +481,7 @@ class MetricsTracker:
         # Per-class metrics
         if self.track_per_class and self.num_classes is not None:
             # Compute per-class metrics using the same approach as compute_per_class_metrics
-            from jax import nn
-            
+
             # Convert one-hot to class indices
             train_labels = jnp.argmax(Y_train, axis=1)
             test_labels = jnp.argmax(Y_test, axis=1) if Y_test is not None else None
@@ -493,10 +492,26 @@ class MetricsTracker:
                 if jnp.sum(train_mask) > 0:
                     X_train_c = X_train[train_mask]
                     Y_train_c = Y_train[train_mask]
-                    
-                    train_logits_c = model_fn(params, X_train_c)
-                    train_loss_c = float(-jnp.mean(jnp.sum(Y_train_c * nn.log_softmax(train_logits_c), axis=1)))
-                    train_acc_c = float(jnp.mean(jnp.argmax(train_logits_c, axis=1) == jnp.argmax(Y_train_c, axis=1)))
+
+                    train_loss_c = float(
+                        cross_entropy_loss_batched(
+                            model_fn,
+                            params,
+                            X_train_c,
+                            Y_train_c,
+                            l2_reg=0.0,
+                            batch_size=self.eval_batch_size,
+                        )
+                    )
+                    train_acc_c = float(
+                        classification_accuracy_batched(
+                            model_fn,
+                            params,
+                            X_train_c,
+                            Y_train_c,
+                            batch_size=self.eval_batch_size,
+                        )
+                    )
                 else:
                     train_loss_c = 0.0
                     train_acc_c = 0.0
@@ -510,10 +525,26 @@ class MetricsTracker:
                     if jnp.sum(test_mask) > 0:
                         X_test_c = X_test[test_mask]
                         Y_test_c = Y_test[test_mask]
-                        
-                        test_logits_c = model_fn(params, X_test_c)
-                        test_loss_c = float(-jnp.mean(jnp.sum(Y_test_c * nn.log_softmax(test_logits_c), axis=1)))
-                        test_acc_c = float(jnp.mean(jnp.argmax(test_logits_c, axis=1) == jnp.argmax(Y_test_c, axis=1)))
+
+                        test_loss_c = float(
+                            cross_entropy_loss_batched(
+                                model_fn,
+                                params,
+                                X_test_c,
+                                Y_test_c,
+                                l2_reg=0.0,
+                                batch_size=self.eval_batch_size,
+                            )
+                        )
+                        test_acc_c = float(
+                            classification_accuracy_batched(
+                                model_fn,
+                                params,
+                                X_test_c,
+                                Y_test_c,
+                                batch_size=self.eval_batch_size,
+                            )
+                        )
                     else:
                         test_loss_c = 0.0
                         test_acc_c = 0.0

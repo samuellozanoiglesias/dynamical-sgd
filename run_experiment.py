@@ -12,6 +12,8 @@ Usage:
 """
 
 import argparse
+import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Optional, List, Dict
@@ -67,10 +69,18 @@ def add_experiment_log_file(output_dir: Path):
     logging.info(f"Training process log: {output_dir / 'training_process.log'}")
 
 
+def _gpu_available() -> bool:
+    """Return True if a JAX GPU backend is present, without raising."""
+    try:
+        return jax.device_count('gpu') > 0
+    except RuntimeError:
+        return False
+
+
 def setup_device(config: ExperimentConfig):
     """Setup JAX device configuration."""
     if config.device == "gpu":
-        if jax.device_count('gpu') > 0:
+        if _gpu_available():
             print(f"Using GPU: {jax.devices('gpu')[0]}")
         else:
             print("GPU requested but not available, falling back to CPU")
@@ -78,7 +88,7 @@ def setup_device(config: ExperimentConfig):
         jax.config.update('jax_platform_name', 'cpu')
         print("Using CPU")
     else:  # auto
-        if jax.device_count('gpu') > 0:
+        if _gpu_available():
             print(f"Auto-detected GPU: {jax.devices('gpu')[0]}")
         else:
             print("Auto-detected CPU")
@@ -109,6 +119,43 @@ def create_output_directory(config: ExperimentConfig) -> Path:
     
     logging.info(f"Output directory: {output_dir}")
     return output_dir
+
+
+def run_notebook_compatible_mnist_pipeline(config: ExperimentConfig, output_dir: Path) -> None:
+    """Run MNIST experiment using the exact notebook-compatible torch pipeline."""
+    notebook_script = project_root / "neuralcollapse_notebook.py"
+    results_dir = output_dir / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    env = os.environ.copy()
+    env["NC_RESULTS_DIR"] = str(results_dir)
+    # Keep the original notebook default to preserve notebook-equivalent behavior.
+    env.setdefault("NC_EPOCHS", "10")
+
+    logging.info("Running notebook-compatible MNIST path via neuralcollapse_notebook.py")
+    logging.info("This path uses the notebook metric formulas and plotting structure.")
+
+    if config.dynamics.dynamics_enabled():
+        logging.info(
+            "Notebook-compatible MNIST path ignores bump dynamics overrides "
+            "and follows notebook training behavior exactly."
+        )
+
+    cmd = [sys.executable, str(notebook_script)]
+    subprocess.run(cmd, cwd=project_root, env=env, check=True)
+
+    summary_path = output_dir / "summary.json"
+    if summary_path.exists():
+        import json
+
+        with open(summary_path, "r", encoding="utf-8") as f:
+            summary_data = json.load(f)
+        summary_data["mnist_execution_mode"] = "notebook_compatible"
+        summary_data["notebook_results_dir"] = str(results_dir)
+        with open(summary_path, "w", encoding="utf-8") as f:
+            json.dump(summary_data, f, indent=2)
+
+    logging.info(f"Notebook-compatible outputs saved under: {results_dir}")
 
 
 def generate_and_prepare_data(config: ExperimentConfig):
@@ -219,11 +266,15 @@ def create_and_train_model(
     )
     
     # Setup metrics tracking
+    # Prefer explicit config value so low-memory runs can tune this easily.
+    architecture = getattr(config.model, 'architecture', 'mlp').lower()
+    default_eval_batch = 256 if architecture == 'densenet40' else 5000
+    eval_batch_size = int(getattr(config.training, 'eval_batch_size', default_eval_batch))
     metrics_tracker = MetricsTracker(
         track_calibration=True,
-        track_per_class=True,
+        track_per_class=bool(getattr(config.analysis, 'track_per_class', True)),
         num_classes=config.data.num_classes,
-        eval_batch_size=5000  # Use batched evaluation to avoid OOM on large datasets (e.g., MNIST)
+        eval_batch_size=eval_batch_size
     )
     
     # Validate dynamics configuration and warn about potential issues
@@ -345,7 +396,8 @@ def create_and_train_model(
             num_hidden_layers=getattr(config.model, 'num_hidden_layers', 1),
             use_batchnorm=getattr(config.model, 'use_batchnorm', True),
             use_bias=getattr(config.model, 'use_bias', True),
-            classifier=classifier  # Pass classifier object for architecture-specific handling
+            classifier=classifier,  # Pass classifier object for architecture-specific handling
+            feature_batch_size=eval_batch_size,
         )
         # Define snapshot epochs
         snapshot_interval = config.analysis.nc_snapshot_interval
@@ -423,7 +475,7 @@ def create_and_train_model(
             # Track metrics only at validation intervals
             if t % config.training.validation_interval == 0 or t == config.training.total_steps - 1:
                 current_metrics = metrics_tracker.update(
-                    classifier.model[1], params, X_train, Y_train, X_test, Y_test, grads, l2_reg=config.optimizer.l2_reg
+                    classifier.forward_fn, params, X_train, Y_train, X_test, Y_test, grads, l2_reg=config.optimizer.l2_reg
                 )
                 
                 train_losses.append(current_metrics['train_loss'])
@@ -533,7 +585,7 @@ def create_visualizations(
     # Plot decision boundary
     if config.visualization.save_decision_boundaries and classifier.last_params is not None:
         plot_decision_boundary(
-            classifier.model[1],
+            classifier.forward_fn,
             classifier.last_params,
             X_train,
             Y_train,
@@ -656,7 +708,7 @@ def compute_per_class_metrics(classifier, params, X_train, Y_train, X_test, Y_te
             X_train_c = X_train[train_mask]
             Y_train_c = Y_train[train_mask]
             
-            train_logits_c = classifier.model[1](params, X_train_c)
+            train_logits_c = classifier.forward_fn(params, X_train_c)
             train_loss_c = float(-jnp.mean(jnp.sum(Y_train_c * nn.log_softmax(train_logits_c), axis=1)))
             train_acc_c = float(jnp.mean(jnp.argmax(train_logits_c, axis=1) == jnp.argmax(Y_train_c, axis=1)))
         else:
@@ -669,7 +721,7 @@ def compute_per_class_metrics(classifier, params, X_train, Y_train, X_test, Y_te
             X_test_c = X_test[test_mask]
             Y_test_c = Y_test[test_mask]
             
-            test_logits_c = classifier.model[1](params, X_test_c)
+            test_logits_c = classifier.forward_fn(params, X_test_c)
             test_loss_c = float(-jnp.mean(jnp.sum(Y_test_c * nn.log_softmax(test_logits_c), axis=1)))
             test_acc_c = float(jnp.mean(jnp.argmax(test_logits_c, axis=1) == jnp.argmax(Y_test_c, axis=1)))
         else:
@@ -830,6 +882,13 @@ def main():
         
         # Add training process log to experiment directory
         add_experiment_log_file(output_dir)
+
+        # MNIST path: execute the notebook-compatible implementation directly.
+        if getattr(config.data, 'dataset_name', 'spiral').lower() == 'mnist':
+            run_notebook_compatible_mnist_pipeline(config, output_dir)
+            logging.info("Experiment completed successfully!")
+            logging.info(f"Results saved to: {output_dir}")
+            return
         
         # Generate data
         X_train, Y_train, X_test, Y_test = generate_and_prepare_data(config)
