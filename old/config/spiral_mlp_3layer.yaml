@@ -1,0 +1,52 @@
+description: "Spiral dataset with 3-layer MLP"
+random_seed: 42
+device: "auto"
+
+# Data configuration
+data:
+  dataset_name: "spiral"
+  points_per_class: 500
+  num_classes: 3
+  revolutions: 10.0
+  noise_std: 0.1
+  test_ratio: 0.25
+  random_seed: 0
+  randomize_offsets: false
+  angular_offsets: null
+  min_radius: 0.05
+
+# Model configuration
+model:
+  architecture: "mlp"
+  nn_width: 512
+  num_hidden_layers: 3
+  use_bias: true
+
+# Training configuration
+training:
+  total_steps: 25000
+  steps_per_epoch: 50
+  batch_size: 128
+
+# Dynamics configuration
+dynamics:
+  bumps_before_TPT: true
+  bumps_at_TPT: false
+  period_length: 500
+  w_max: 50.0
+  tpt_accuracy_threshold: 1.0
+
+optimizer:
+  beta1: 0.9
+  beta2: 0.999
+  eps: 1.0e-08
+  gradient_clipping: null
+  l2_reg: 0
+  learning_rate: 0.002
+  momentum: 0.9
+  optimizer_type: adam
+
+# Output configuration
+output:
+  output_dir: "outputs"
+  experiment_name: "spiral_mlp_3layer"

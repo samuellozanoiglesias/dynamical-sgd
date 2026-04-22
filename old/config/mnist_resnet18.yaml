@@ -1,0 +1,33 @@
+description: "MNIST dataset with ResNet18"
+random_seed: 42
+device: "auto"
+
+# Data configuration
+data:
+  dataset_name: "mnist"
+  data_dir: "./data"
+  num_classes: 10
+
+# Model configuration
+model:
+  architecture: "resnet18"
+  use_bias: true
+
+# Training configuration
+training:
+  training_steps: 25000
+  steps_per_epoch: 50
+  batch_size: 128
+
+# Dynamics configuration
+dynamics:
+  bumps_before_TPT: true
+  bumps_at_TPT: false
+  period_length: 250
+  w_max: 50.0
+  tpt_accuracy_threshold: 1.0
+
+# Output configuration
+output:
+  output_dir: "outputs"
+  experiment_name: "mnist_resnet18"
