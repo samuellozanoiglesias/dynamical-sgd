@@ -28,6 +28,12 @@ from neural_collapse import (
     initialize_nc_csv,
 )
 from model import build_model
+from separability_measures import (
+    append_separability_csv_row,
+    collect_separability_epoch,
+    finalize_separability_metrics,
+    initialize_separability_csv,
+)
 
 
 @dataclass
@@ -455,8 +461,14 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
 
     csv_path = run_dir / "training_metrics.csv"
     nc_csv_path = run_dir / "nc_metrics.csv"
+    separability_csv_path = run_dir / "separability_metrics.csv"
+    separability_figure_path = run_dir / "separability_measures.png"
     figure_path = run_dir / "training_report.png"
     neural_collapse_figure_path = run_dir / "neural_collapse.png"
+    separability_eval_interval = int(training_cfg.get("separability_eval_interval", 1))
+    separability_probe_l2 = float(training_cfg.get("separability_probe_l2", 1e-3))
+    if separability_eval_interval <= 0:
+        raise ValueError("training.separability_eval_interval must be > 0")
     nc_class_pairs = build_nc_class_pairs(num_classes)
     initialize_nc_csv(
         nc_csv_path=nc_csv_path,
@@ -464,6 +476,7 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
         num_classes=num_classes,
         class_pairs=nc_class_pairs,
     )
+    initialize_separability_csv(separability_csv_path)
 
     total_epochs = int(math.ceil(total_steps / steps_per_epoch))
     global_step = 0
@@ -535,6 +548,27 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
                 num_classes=num_classes,
             )
 
+            should_eval_separability = (
+                epoch == 1
+                or epoch == total_epochs
+                or (epoch % separability_eval_interval == 0)
+            )
+            if should_eval_separability:
+                separability_raw = collect_separability_epoch(
+                    model=model,
+                    train_loader=train_eval_loader,
+                    test_loader=test_loader,
+                    device=device,
+                    num_classes=num_classes,
+                    probe_l2_reg=separability_probe_l2,
+                )
+                append_separability_csv_row(
+                    csv_path=separability_csv_path,
+                    epoch=epoch,
+                    global_step=global_step,
+                    raw=separability_raw,
+                )
+
             if (not tpt_reached) and bool(train_metrics.get("zero_training_error", False)):
                 tpt_reached = True
                 tpt_step = global_step
@@ -593,6 +627,17 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
         class_pairs=nc_class_pairs,
         tpt_step=tpt_step if tpt_reached else -1,
     )
+    neural_collapse_weights_figure_path = neural_collapse_figure_path.with_name(
+        f"{neural_collapse_figure_path.stem}_weights{neural_collapse_figure_path.suffix}"
+    )
+    neural_collapse_bias_figure_path = neural_collapse_figure_path.with_name(
+        f"{neural_collapse_figure_path.stem}_bias{neural_collapse_figure_path.suffix}"
+    )
+    finalize_separability_metrics(
+        csv_path=separability_csv_path,
+        output_path=separability_figure_path,
+        tpt_step=tpt_step if tpt_reached else -1,
+    )
 
     boundary_figure_path: Path | None = None
     if dataset_name.strip().lower() == "spiral":
@@ -615,8 +660,12 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
         "tpt_step": int(tpt_step),
         "csv_path": str(csv_path),
         "nc_csv_path": str(nc_csv_path),
+        "separability_csv_path": str(separability_csv_path),
         "figure_path": str(figure_path),
         "neural_collapse_figure_path": str(neural_collapse_figure_path),
+        "neural_collapse_weights_figure_path": str(neural_collapse_weights_figure_path),
+        "neural_collapse_bias_figure_path": str(neural_collapse_bias_figure_path),
+        "separability_figure_path": str(separability_figure_path),
         "distribution_figure_path": str(distribution_figure_path),
         "decision_boundary_path": str(boundary_figure_path) if boundary_figure_path is not None else None,
         "final_train_loss": float(last_train_metrics["loss"]),

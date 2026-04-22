@@ -1,4 +1,4 @@
-use_gpu: false
+use_gpu: true
 
 data:
   dataset_name: spiral
@@ -8,14 +8,14 @@ data:
   revolutions: 5.0
   noise_std: 0.2
   test_ratio: 0.25
-  min_radius: 0.02
+  min_radius: 0.01
   random_seed: 0
   # Optional explicit initial class angles in degrees.
   # Keep null for homogeneous spacing; provide a list (length = num_classes)
   # if you want different initial angles.
   angular_offsets: null
 model:
-  architecture: mlp
+  architecture: mlp_tanh
   nn_width: 50
   num_hidden_layers: 1
   use_bias: true
@@ -35,7 +35,7 @@ optimizer:
   momentum: 0.9
   optimizer_type: adam
 dynamics:
-  bumps_before_TPT: false
+  bumps_before_TPT: true
   bumps_at_TPT: false
   period_length: 1000
   w_max: 40.0

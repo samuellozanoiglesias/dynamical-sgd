@@ -31,6 +31,22 @@ class NCEpochRaw:
 	layer_mu_sqnorm: dict[str, np.ndarray]
 	layer_feat_sqmean: dict[str, np.ndarray]
 	layer_pair_dot: dict[str, np.ndarray]
+	layer_feature_dim: dict[str, int]
+	param_weight_l2: float
+	param_weight_mean_abs: float
+	param_weight_std: float
+	param_weight_max_abs: float
+	param_bias_l2: float
+	param_bias_mean_abs: float
+	param_bias_std: float
+	param_bias_max_abs: float
+	classifier_weight_row_norm_mean: float
+	classifier_weight_row_norm_cov: float
+	classifier_weight_pair_cos_raw_mean: float
+	classifier_weight_pair_cos_centered_mean: float
+	classifier_bias_mean_abs: float
+	classifier_bias_std: float
+	classifier_bias_span: float
 
 
 def build_nc_class_pairs(num_classes: int) -> list[tuple[int, int]]:
@@ -74,6 +90,59 @@ def build_nc_layer_specs(model: nn.Module) -> list[NCLayerSpec]:
 
 def _flatten_features(x: torch.Tensor) -> torch.Tensor:
 	return x.reshape(x.shape[0], -1)
+
+
+def _collect_parameter_vector(model: nn.Module, include_bias: bool, device: torch.device) -> torch.Tensor:
+	parts: list[torch.Tensor] = []
+	for name, param in model.named_parameters():
+		if not param.requires_grad:
+			continue
+		is_bias = name.endswith("bias") or name.endswith(".bias")
+		if include_bias != is_bias:
+			continue
+		parts.append(param.detach().to(device=device, dtype=torch.float64).reshape(-1))
+	if not parts:
+		return torch.zeros(0, device=device, dtype=torch.float64)
+	return torch.cat(parts, dim=0)
+
+
+def _summarize_vector(vec: torch.Tensor) -> tuple[float, float, float, float]:
+	if vec.numel() == 0:
+		return (float("nan"), float("nan"), float("nan"), float("nan"))
+	abs_vec = torch.abs(vec)
+	l2 = torch.linalg.vector_norm(vec)
+	mean_abs = torch.mean(abs_vec)
+	std = torch.std(vec, unbiased=False)
+	max_abs = torch.max(abs_vec)
+	return float(l2.item()), float(mean_abs.item()), float(std.item()), float(max_abs.item())
+
+
+def _classifier_weight_geometry(weight: torch.Tensor) -> tuple[float, float, float, float]:
+	if weight.ndim != 2 or weight.shape[0] < 2:
+		return (float("nan"), float("nan"), float("nan"), float("nan"))
+
+	norms = torch.linalg.vector_norm(weight, dim=1)
+	norm_mean = torch.mean(norms)
+	norm_cov = torch.std(norms, unbiased=False) / torch.clamp(norm_mean.abs(), min=EPS)
+
+	normalized = weight / torch.clamp(norms.unsqueeze(1), min=EPS)
+	raw_gram = torch.clamp(normalized @ normalized.T, min=-1.0, max=1.0)
+	raw_mask = ~torch.eye(weight.shape[0], dtype=torch.bool, device=weight.device)
+	raw_cos_mean = torch.mean(raw_gram[raw_mask])
+
+	centered = weight - torch.mean(weight, dim=0, keepdim=True)
+	centered_norms = torch.linalg.vector_norm(centered, dim=1)
+	centered_normalized = centered / torch.clamp(centered_norms.unsqueeze(1), min=EPS)
+	centered_gram = torch.clamp(centered_normalized @ centered_normalized.T, min=-1.0, max=1.0)
+	centered_mask = ~torch.eye(weight.shape[0], dtype=torch.bool, device=weight.device)
+	centered_cos_mean = torch.mean(centered_gram[centered_mask])
+
+	return (
+		float(norm_mean.item()),
+		float(norm_cov.item()),
+		float(raw_cos_mean.item()),
+		float(centered_cos_mean.item()),
+	)
 
 
 def _register_layer_hooks(specs: list[NCLayerSpec], captured: dict[str, torch.Tensor]) -> list[Any]:
@@ -187,11 +256,13 @@ def collect_nc_raw_epoch(
 		layer_mu_sqnorm: dict[str, np.ndarray] = {}
 		layer_feat_sqmean: dict[str, np.ndarray] = {}
 		layer_pair_dot: dict[str, np.ndarray] = {}
+		layer_feature_dim: dict[str, int] = {}
 
 		for spec in layer_specs:
 			sums = layer_sums[spec.name]
 			if sums is None:
 				raise ValueError(f"No activations found for layer '{spec.name}'.")
+			layer_feature_dim[spec.name] = int(sums.shape[1])
 			means = sums / class_counts.unsqueeze(1)
 			mu_sqnorm = torch.sum(means * means, dim=1)
 			feat_sqmean = layer_sqnorm_sums[spec.name] / class_counts
@@ -207,6 +278,39 @@ def collect_nc_raw_epoch(
 			layer_feat_sqmean[spec.name] = feat_sqmean.detach().cpu().numpy().astype(np.float64)
 			layer_pair_dot[spec.name] = pair_dot.detach().cpu().numpy().astype(np.float64)
 
+		all_weight_params = _collect_parameter_vector(model, include_bias=False, device=device)
+		all_bias_params = _collect_parameter_vector(model, include_bias=True, device=device)
+		param_weight_l2, param_weight_mean_abs, param_weight_std, param_weight_max_abs = _summarize_vector(all_weight_params)
+		param_bias_l2, param_bias_mean_abs, param_bias_std, param_bias_max_abs = _summarize_vector(all_bias_params)
+
+		classifier = getattr(model, "fc", None)
+		if isinstance(classifier, nn.Linear):
+			classifier_weight = classifier.weight.detach().to(device=device, dtype=torch.float64)
+			(
+				classifier_weight_row_norm_mean,
+				classifier_weight_row_norm_cov,
+				classifier_weight_pair_cos_raw_mean,
+				classifier_weight_pair_cos_centered_mean,
+			) = _classifier_weight_geometry(classifier_weight)
+
+			if classifier.bias is not None:
+				classifier_bias = classifier.bias.detach().to(device=device, dtype=torch.float64)
+				classifier_bias_mean_abs = float(torch.mean(torch.abs(classifier_bias)).item())
+				classifier_bias_std = float(torch.std(classifier_bias, unbiased=False).item())
+				classifier_bias_span = float((torch.max(classifier_bias) - torch.min(classifier_bias)).item())
+			else:
+				classifier_bias_mean_abs = float("nan")
+				classifier_bias_std = float("nan")
+				classifier_bias_span = float("nan")
+		else:
+			classifier_weight_row_norm_mean = float("nan")
+			classifier_weight_row_norm_cov = float("nan")
+			classifier_weight_pair_cos_raw_mean = float("nan")
+			classifier_weight_pair_cos_centered_mean = float("nan")
+			classifier_bias_mean_abs = float("nan")
+			classifier_bias_std = float("nan")
+			classifier_bias_span = float("nan")
+
 		return NCEpochRaw(
 			class_counts=class_counts.detach().cpu().numpy().astype(np.float64),
 			margin_sum=margin_sum,
@@ -215,6 +319,22 @@ def collect_nc_raw_epoch(
 			layer_mu_sqnorm=layer_mu_sqnorm,
 			layer_feat_sqmean=layer_feat_sqmean,
 			layer_pair_dot=layer_pair_dot,
+			layer_feature_dim=layer_feature_dim,
+			param_weight_l2=param_weight_l2,
+			param_weight_mean_abs=param_weight_mean_abs,
+			param_weight_std=param_weight_std,
+			param_weight_max_abs=param_weight_max_abs,
+			param_bias_l2=param_bias_l2,
+			param_bias_mean_abs=param_bias_mean_abs,
+			param_bias_std=param_bias_std,
+			param_bias_max_abs=param_bias_max_abs,
+			classifier_weight_row_norm_mean=classifier_weight_row_norm_mean,
+			classifier_weight_row_norm_cov=classifier_weight_row_norm_cov,
+			classifier_weight_pair_cos_raw_mean=classifier_weight_pair_cos_raw_mean,
+			classifier_weight_pair_cos_centered_mean=classifier_weight_pair_cos_centered_mean,
+			classifier_bias_mean_abs=classifier_bias_mean_abs,
+			classifier_bias_std=classifier_bias_std,
+			classifier_bias_span=classifier_bias_span,
 		)
 	finally:
 		for handle in handles:
@@ -233,9 +353,30 @@ def initialize_nc_csv(
 	header.extend([f"count_{class_id}" for class_id in range(num_classes)])
 
 	for layer_name in layer_names:
+		header.append(f"{layer_name}_feature_dim")
 		header.extend([f"{layer_name}_mu_sqnorm_{class_id}" for class_id in range(num_classes)])
 		header.extend([f"{layer_name}_feat_sqmean_{class_id}" for class_id in range(num_classes)])
 		header.extend([f"{layer_name}_dot_{left}_{right}" for left, right in class_pairs])
+
+	header.extend(
+		[
+			"param_weight_l2",
+			"param_weight_mean_abs",
+			"param_weight_std",
+			"param_weight_max_abs",
+			"param_bias_l2",
+			"param_bias_mean_abs",
+			"param_bias_std",
+			"param_bias_max_abs",
+			"classifier_weight_row_norm_mean",
+			"classifier_weight_row_norm_cov",
+			"classifier_weight_pair_cos_raw_mean",
+			"classifier_weight_pair_cos_centered_mean",
+			"classifier_bias_mean_abs",
+			"classifier_bias_std",
+			"classifier_bias_span",
+		]
+	)
 
 	with open(nc_csv_path, "w", encoding="utf-8", newline="") as f:
 		writer = csv.writer(f)
@@ -254,9 +395,30 @@ def append_nc_csv_row(
 	row.extend(raw.class_counts[:num_classes].tolist())
 
 	for layer_name in layer_names:
+		row.append(int(raw.layer_feature_dim[layer_name]))
 		row.extend(raw.layer_mu_sqnorm[layer_name].tolist())
 		row.extend(raw.layer_feat_sqmean[layer_name].tolist())
 		row.extend(raw.layer_pair_dot[layer_name].tolist())
+
+	row.extend(
+		[
+			raw.param_weight_l2,
+			raw.param_weight_mean_abs,
+			raw.param_weight_std,
+			raw.param_weight_max_abs,
+			raw.param_bias_l2,
+			raw.param_bias_mean_abs,
+			raw.param_bias_std,
+			raw.param_bias_max_abs,
+			raw.classifier_weight_row_norm_mean,
+			raw.classifier_weight_row_norm_cov,
+			raw.classifier_weight_pair_cos_raw_mean,
+			raw.classifier_weight_pair_cos_centered_mean,
+			raw.classifier_bias_mean_abs,
+			raw.classifier_bias_std,
+			raw.classifier_bias_span,
+		]
+	)
 
 	with open(nc_csv_path, "a", encoding="utf-8", newline="") as f:
 		writer = csv.writer(f)
@@ -270,12 +432,19 @@ def _load_nc_columns(nc_csv_path: Path) -> list[dict[str, float]]:
 		for row in reader:
 			casted: dict[str, float] = {}
 			for key, value in row.items():
-				if key in {"epoch", "global_step", "margin_count"}:
-					casted[key] = float(int(value))
+				if value is None or value == "":
+					casted[key] = float("nan")
+					continue
+				if key in {"epoch", "global_step", "margin_count"} or key.endswith("_feature_dim"):
+					casted[key] = float(int(float(value)))
 				else:
 					casted[key] = float(value)
 			rows.append(casted)
 	return rows
+
+
+def _column_or_nan(rows: list[dict[str, float]], key: str) -> np.ndarray:
+	return np.asarray([float(row.get(key, float("nan"))) for row in rows], dtype=np.float64)
 
 
 def _plot_nc_dashboard(
@@ -300,8 +469,8 @@ def _plot_nc_dashboard(
 	for layer_name in layer_names:
 		ax.plot(steps, inter_mean_by_layer[layer_name], linewidth=1.8, label=layer_name)
 	ax.axhline(0.0, linestyle="--", color="gray", alpha=0.6, label="floor 0")
-	ax.set_title("Inter-class Distance Mean (higher is better)")
-	ax.set_ylabel("Mean ||mu_i - mu_j||")
+	ax.set_title("Inter-class Distance RMS (higher is better)")
+	ax.set_ylabel("Mean ||mu_i - mu_j|| / sqrt(d)")
 	ax.grid(True, alpha=0.3)
 	ax.legend(fontsize=8)
 
@@ -309,8 +478,8 @@ def _plot_nc_dashboard(
 	for layer_name in layer_names:
 		ax.plot(steps, within_std_by_layer[layer_name], linewidth=1.8, label=layer_name)
 	ax.axhline(0.0, linestyle="--", color="gray", alpha=0.6, label="target 0 (down)")
-	ax.set_title("Within-class Spread (lower is better)")
-	ax.set_ylabel("Mean class std")
+	ax.set_title("Within-class Spread RMS (lower is better)")
+	ax.set_ylabel("Mean sqrt(tr(Cov_c) / d)")
 	ax.grid(True, alpha=0.3)
 	ax.legend(fontsize=8)
 
@@ -328,7 +497,7 @@ def _plot_nc_dashboard(
 	if num_classes > 1:
 		target_cos = -1.0 / float(num_classes - 1)
 		ax.axhline(target_cos, linestyle="--", color="gray", alpha=0.7, label=f"ETF target {target_cos:.3f}")
-	ax.set_title("Mean Pairwise Cosine Between Class Means")
+	ax.set_title("Mean Pairwise Cosine Between Centered Class Means")
 	ax.set_ylabel("Mean cosine")
 	ax.grid(True, alpha=0.3)
 	ax.legend(fontsize=8)
@@ -376,6 +545,33 @@ def _plot_nc_dashboard(
 	plt.close(fig)
 
 
+def _plot_parameter_dashboard(
+	steps: np.ndarray,
+	series: list[tuple[str, np.ndarray]],
+	output_path: Path,
+	title: str,
+	tpt_step: int,
+) -> None:
+	fig, axes = plt.subplots(3, 2, figsize=(18, 14), sharex=True)
+	flat_axes = list(axes.flat)
+
+	for ax, (series_name, values) in zip(flat_axes, series):
+		ax.plot(steps, values, linewidth=1.8)
+		ax.set_title(series_name)
+		ax.grid(True, alpha=0.3)
+		if tpt_step >= 0:
+			ax.axvline(tpt_step, color="black", linestyle="-", linewidth=2.0)
+
+	for ax in flat_axes[-2:]:
+		ax.set_xlabel("Global Step")
+
+	fig.suptitle(title, fontsize=16)
+	plt.tight_layout(rect=[0.0, 0.0, 1.0, 0.97])
+	output_path.parent.mkdir(parents=True, exist_ok=True)
+	plt.savefig(output_path, dpi=180, bbox_inches="tight")
+	plt.close(fig)
+
+
 def finalize_nc_metrics(
 	nc_csv_path: Path,
 	output_path: Path,
@@ -389,6 +585,12 @@ def finalize_nc_metrics(
 		raise ValueError(f"No NC rows found in {nc_csv_path}")
 
 	steps = np.asarray([int(row["global_step"]) for row in rows], dtype=np.int64)
+	class_counts = np.asarray(
+		[[row[f"count_{class_id}"] for class_id in range(num_classes)] for row in rows],
+		dtype=np.float64,
+	)
+	class_count_total = np.clip(np.sum(class_counts, axis=1, keepdims=True), 1.0, None)
+	class_weights = class_counts / class_count_total
 	margin_sum = np.asarray([row["margin_sum"] for row in rows], dtype=np.float64)
 	margin_sq_sum = np.asarray([row["margin_sq_sum"] for row in rows], dtype=np.float64)
 	margin_count = np.asarray([max(1.0, row["margin_count"]) for row in rows], dtype=np.float64)
@@ -406,6 +608,13 @@ def finalize_nc_metrics(
 	pre_classifier_pair_dist = np.zeros((len(rows), len(class_pairs)), dtype=np.float64)
 
 	for layer_name in layer_names:
+		feature_dim = np.nan_to_num(
+			_column_or_nan(rows, f"{layer_name}_feature_dim"),
+			nan=1.0,
+			posinf=1.0,
+			neginf=1.0,
+		)
+		feature_dim = np.maximum(1.0, feature_dim)
 		mu_sqnorm = np.asarray(
 			[[row[f"{layer_name}_mu_sqnorm_{class_id}"] for class_id in range(num_classes)] for row in rows],
 			dtype=np.float64,
@@ -419,19 +628,40 @@ def finalize_nc_metrics(
 			dtype=np.float64,
 		)
 
-		pair_dist = np.sqrt(
-			np.clip(mu_sqnorm[:, pair_left] + mu_sqnorm[:, pair_right] - 2.0 * pair_dot, 0.0, None)
-		)
-		denom = np.sqrt(np.clip(mu_sqnorm[:, pair_left] * mu_sqnorm[:, pair_right], EPS, None))
-		pair_cos = pair_dot / denom
+		pair_dist = np.sqrt(np.clip(mu_sqnorm[:, pair_left] + mu_sqnorm[:, pair_right] - 2.0 * pair_dot, 0.0, None))
+
+		gram = np.zeros((len(rows), num_classes, num_classes), dtype=np.float64)
+		for class_id in range(num_classes):
+			gram[:, class_id, class_id] = mu_sqnorm[:, class_id]
+		for pair_idx, (left, right) in enumerate(class_pairs):
+			gram[:, left, right] = pair_dot[:, pair_idx]
+			gram[:, right, left] = pair_dot[:, pair_idx]
+
+		pair_cos_centered = np.zeros((len(rows), len(class_pairs)), dtype=np.float64)
+		for row_idx in range(len(rows)):
+			weights = class_weights[row_idx]
+			weights = weights / np.clip(np.sum(weights), EPS, None)
+			gram_row = gram[row_idx]
+			gw = gram_row @ weights
+			scalar = float(weights @ gw)
+			centered_gram_row = (
+				gram_row
+				- np.outer(np.ones(num_classes, dtype=np.float64), gw)
+				- np.outer(gw, np.ones(num_classes, dtype=np.float64))
+				+ scalar
+			)
+			centered_diag = np.clip(np.diag(centered_gram_row), 0.0, None)
+			pair_dot_centered = centered_gram_row[pair_left, pair_right]
+			denom_centered = np.sqrt(np.clip(centered_diag[pair_left] * centered_diag[pair_right], EPS, None))
+			pair_cos_centered[row_idx] = np.clip(pair_dot_centered / denom_centered, -1.0, 1.0)
 
 		within_var = np.clip(feat_sqmean - mu_sqnorm, 0.0, None)
-		within_std = np.sqrt(within_var)
+		within_rms = np.sqrt(within_var / feature_dim[:, None])
 
-		inter_mean = np.mean(pair_dist, axis=1)
-		within_mean = np.mean(within_std, axis=1)
+		inter_mean = np.mean(pair_dist / np.sqrt(feature_dim[:, None]), axis=1)
+		within_mean = np.mean(within_rms, axis=1)
 		separation_ratio = inter_mean / (within_mean + EPS)
-		cosine_mean = np.mean(pair_cos, axis=1)
+		cosine_mean = np.mean(pair_cos_centered, axis=1)
 
 		inter_mean_by_layer[layer_name] = inter_mean
 		within_std_by_layer[layer_name] = within_mean
@@ -453,5 +683,44 @@ def finalize_nc_metrics(
 		class_pairs=class_pairs,
 		num_classes=num_classes,
 		output_path=output_path,
+		tpt_step=tpt_step,
+	)
+
+	weights_output_path = output_path.with_name(f"{output_path.stem}_weights{output_path.suffix}")
+	bias_output_path = output_path.with_name(f"{output_path.stem}_bias{output_path.suffix}")
+
+	_plot_parameter_dashboard(
+		steps=steps,
+		series=[
+			("All Weights L2 Norm (task-dependent)", _column_or_nan(rows, "param_weight_l2")),
+			("All Weights Mean |w| (task-dependent)", _column_or_nan(rows, "param_weight_mean_abs")),
+			("Classifier Row-Norm Mean (task-dependent)", _column_or_nan(rows, "classifier_weight_row_norm_mean")),
+			("Classifier Row-Norm CoV (lower is better)", _column_or_nan(rows, "classifier_weight_row_norm_cov")),
+			(
+				"Classifier Pairwise Cosine (raw, diagnostic)",
+				_column_or_nan(rows, "classifier_weight_pair_cos_raw_mean"),
+			),
+			(
+				"Classifier Pairwise Cosine (centered, toward ETF target)",
+				_column_or_nan(rows, "classifier_weight_pair_cos_centered_mean"),
+			),
+		],
+		output_path=weights_output_path,
+		title="Neural Collapse Parameter Metrics (Weights)",
+		tpt_step=tpt_step,
+	)
+
+	_plot_parameter_dashboard(
+		steps=steps,
+		series=[
+			("All Bias L2 Norm (usually lower is better)", _column_or_nan(rows, "param_bias_l2")),
+			("All Bias Mean |b| (usually lower is better)", _column_or_nan(rows, "param_bias_mean_abs")),
+			("All Bias Std (lower is better)", _column_or_nan(rows, "param_bias_std")),
+			("All Bias Max |b| (lower is better)", _column_or_nan(rows, "param_bias_max_abs")),
+			("Classifier Bias Std (lower is better)", _column_or_nan(rows, "classifier_bias_std")),
+			("Classifier Bias Span max-min (lower is better)", _column_or_nan(rows, "classifier_bias_span")),
+		],
+		output_path=bias_output_path,
+		title="Neural Collapse Parameter Metrics (Bias)",
 		tpt_step=tpt_step,
 	)

@@ -52,6 +52,36 @@ def build_model(
             num_classes=num_classes,
             use_bias=use_bias,
         )
+        # Replace ReLU with Identity
+        for i, layer in enumerate(model.feature_extractor):
+            if isinstance(layer, nn.ReLU):
+                model.feature_extractor[i] = nn.Identity()
+        return model.to(device)
+    
+    if architecture == "mlp_relu":
+        input_dim = int(prod(input_shape))
+        model = MLPClassifier(
+            input_dim=input_dim,
+            hidden_dim=int(model_cfg.get("nn_width", 1000)),
+            num_hidden_layers=int(model_cfg.get("num_hidden_layers", 1)),
+            num_classes=num_classes,
+            use_bias=use_bias,
+        )
+        return model.to(device)
+
+    if architecture == "mlp_tanh":
+        input_dim = int(prod(input_shape))
+        model = MLPClassifier(
+            input_dim=input_dim,
+            hidden_dim=int(model_cfg.get("nn_width", 1000)),
+            num_hidden_layers=int(model_cfg.get("num_hidden_layers", 1)),
+            num_classes=num_classes,
+            use_bias=use_bias,
+        )
+        # Replace ReLU with Tanh
+        for i, layer in enumerate(model.feature_extractor):
+            if isinstance(layer, nn.ReLU):
+                model.feature_extractor[i] = nn.Tanh()
         return model.to(device)
 
     if architecture == "resnet18":
