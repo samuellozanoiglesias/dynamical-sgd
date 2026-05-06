@@ -114,7 +114,6 @@ data:
   num_classes: 3             # Number of spiral classes
   revolutions: 4.0           # Spiral revolutions
   noise_std: 0.2            # Noise level
-  test_ratio: 0.2            # Test set fraction
 ```
 
 ### Model Configuration

@@ -3,11 +3,12 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
+import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
-import torch
 from matplotlib.colors import ListedColormap
-from torch.utils.data import TensorDataset
+
+from model import JAXModel, ParamTree
 
 
 def _to_float(value: str) -> float:
@@ -32,15 +33,14 @@ def _desaturate_towards_white(color: tuple[float, float, float, float], mix: flo
     )
 
 
-def _extract_2d_points(dataset: TensorDataset) -> tuple[np.ndarray, np.ndarray]:
-    inputs, targets = dataset.tensors
-    x = inputs.detach().cpu()
-    y = targets.detach().cpu().numpy()
+def _extract_2d_points(inputs: np.ndarray, targets: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    x = np.asarray(inputs, dtype=np.float32)
+    y = np.asarray(targets, dtype=np.int64)
 
     if x.ndim == 2 and x.shape[1] == 2:
-        return x.numpy(), y
+        return x, y
     if x.ndim == 4 and x.shape[1] == 2 and x.shape[2] == 1 and x.shape[3] == 1:
-        return x[:, :, 0, 0].numpy(), y
+        return x[:, :, 0, 0], y
 
     raise ValueError(
         "Spiral decision boundary plot expects 2D inputs with shape (N,2) "
@@ -48,17 +48,19 @@ def _extract_2d_points(dataset: TensorDataset) -> tuple[np.ndarray, np.ndarray]:
     )
 
 
-@torch.no_grad()
 def plot_spiral_decision_boundaries(
-    model: torch.nn.Module,
-    train_dataset: TensorDataset,
-    test_dataset: TensorDataset,
+    model: JAXModel,
+    params: ParamTree,
+    train_inputs: np.ndarray,
+    train_targets: np.ndarray,
+    test_inputs: np.ndarray,
+    test_targets: np.ndarray,
     output_path: Path,
     title: str,
     grid_size: int = 400,
 ) -> None:
-    train_xy, train_y = _extract_2d_points(train_dataset)
-    test_xy, test_y = _extract_2d_points(test_dataset)
+    train_xy, train_y = _extract_2d_points(train_inputs, train_targets)
+    test_xy, test_y = _extract_2d_points(test_inputs, test_targets)
 
     all_xy = np.concatenate([train_xy, test_xy], axis=0)
     x_min, x_max = float(np.min(all_xy[:, 0])), float(np.max(all_xy[:, 0]))
@@ -72,22 +74,13 @@ def plot_spiral_decision_boundaries(
     )
     grid_xy = np.column_stack([xx.ravel(), yy.ravel()]).astype(np.float32)
 
-    input_rank = int(train_dataset.tensors[0].ndim)
-    model_input = torch.from_numpy(grid_xy)
+    input_rank = int(np.asarray(train_inputs).ndim)
+    model_input = grid_xy
     if input_rank == 4:
-        model_input = model_input.view(-1, 2, 1, 1)
+        model_input = np.reshape(model_input, (-1, 2, 1, 1))
 
-    try:
-        device = next(model.parameters()).device
-    except StopIteration:
-        device = torch.device("cpu")
-
-    was_training = model.training
-    model.eval()
-    logits = model(model_input.to(device))
-    pred = torch.argmax(logits, dim=1).detach().cpu().numpy().reshape(xx.shape)
-    if was_training:
-        model.train()
+    logits = model.apply(params, model_input)
+    pred = np.asarray(jnp.argmax(logits, axis=1), dtype=np.int64).reshape(xx.shape)
 
     max_class = int(max(np.max(train_y), np.max(test_y), np.max(pred)))
     num_classes = max_class + 1

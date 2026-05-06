@@ -7,7 +7,6 @@ data:
   points_per_class: 100
   revolutions: 4.0
   noise_std: 0.2
-  test_ratio: 0.25
   min_radius: 0.01
   random_seed: 0
   # Optional explicit initial class angles in degrees.
@@ -16,12 +15,13 @@ data:
   angular_offsets: null
 model:
   architecture: mlp
+  init_type: glorot
   nn_width: 50
   num_hidden_layers: 1
   use_bias: true
 training:
   training_steps: 150000
-  steps_per_epoch: 50
+  save_metrics_every_n_steps: 50
   batch_size: 50
   random_seed: 42
   loss: cross_entropy

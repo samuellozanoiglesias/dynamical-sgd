@@ -1,18 +1,26 @@
 use_gpu: false
 
 data:
-  dataset_name: mnist
+  dataset_name: spiral
   data_dir: ./data
-  num_classes: 10
-  random_seed: 42
+  num_classes: 3
+  points_per_class: 100
+  revolutions: 4.0
+  noise_std: 0.2
+  min_radius: 0.01
+  random_seed: 0
+  # Optional explicit initial class angles in degrees.
+  # Keep null for homogeneous spacing; provide a list (length = num_classes)
+  # if you want different initial angles.
+  angular_offsets: null
 model:
-  architecture: mlp
+  architecture: mlp_relu
   init_type: glorot
-  nn_width: 100
+  nn_width: 50
   num_hidden_layers: 1
   use_bias: true
 training:
-  training_steps: 25000
+  training_steps: 150000
   save_metrics_every_n_steps: 50
   batch_size: 200
   random_seed: 42
@@ -23,14 +31,14 @@ optimizer:
   eps: 1.0e-08
   gradient_clipping: null
   l2_reg: 0.0
-  learning_rate: 0.01
+  learning_rate: 0.002
   momentum: 0.9
   optimizer_type: adam
 dynamics:
   bumps_before_TPT: false
   bumps_at_TPT: false
-  period_length: 250
-  w_max: 50.0
+  period_length: 5000
+  w_max: 1.0
   amplitude: 1.0
   tpt_accuracy_threshold: 1.0
 output:

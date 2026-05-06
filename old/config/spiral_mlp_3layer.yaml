@@ -25,7 +25,7 @@ model:
 # Training configuration
 training:
   total_steps: 25000
-  steps_per_epoch: 50
+  save_metrics_every_n_steps: 50
   batch_size: 128
 
 # Dynamics configuration

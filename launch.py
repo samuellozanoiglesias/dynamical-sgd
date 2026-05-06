@@ -51,13 +51,12 @@ from __future__ import annotations
 
 import argparse
 import copy
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 
 import yaml
-
-from training_runner import run_training
 
 
 def _parse_override_value(raw: str) -> Any:
@@ -244,6 +243,19 @@ def main() -> None:
     run_timestamp = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
     _ensure_output_section(base_config, config_path, run_timestamp=run_timestamp)
     _normalize_device_config(base_config)
+
+    # JAX may fail CPU fallback if CUDA plugins are broken; force the selected backend early.
+    selected_device = str(base_config.get("device", "auto")).strip().lower()
+    if selected_device == "cpu":
+        os.environ["JAX_PLATFORMS"] = "cpu"
+        os.environ["JAX_PLATFORM_NAME"] = "cpu"
+    elif selected_device == "cuda":
+        os.environ["JAX_PLATFORMS"] = "cuda"
+        os.environ["JAX_PLATFORM_NAME"] = "cuda"
+
+    # Delay importing the JAX training stack until backend preference is pinned.
+    from training_runner import run_training
+
     setup_plan = _mode_plan(args.mode)
     training_id = _build_training_id()
 

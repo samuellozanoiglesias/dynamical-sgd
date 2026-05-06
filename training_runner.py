@@ -3,15 +3,16 @@ from __future__ import annotations
 import csv
 import json
 import math
+import os
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Callable, Dict
 
+import jax
+import jax.numpy as jnp
 import numpy as np
-import torch
-import torch.nn.functional as F
-from torch.utils.data import DataLoader, TensorDataset
+import optax
 
 from generate_dataset import DatasetBundle, build_dataset_bundle
 from metrics import (
@@ -22,18 +23,18 @@ from metrics import (
 from neural_collapse import (
     append_nc_csv_row,
     build_nc_class_pairs,
-    build_nc_layer_specs,
     collect_nc_raw_epoch,
     finalize_nc_metrics,
     initialize_nc_csv,
 )
-from model import build_model
 from separability_measures import (
-    append_separability_csv_row,
-    collect_separability_epoch,
-    finalize_separability_metrics,
-    initialize_separability_csv,
+    SepEpochRaw,
+    append_sep_csv_row,
+    collect_sep_raw_epoch,
+    finalize_sep_metrics,
+    initialize_sep_csv,
 )
+from model import JAXModel, ParamTree, build_model
 
 
 @dataclass
@@ -57,22 +58,60 @@ def _as_bool(value: Any) -> bool:
 def _set_global_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
 
 
-def _resolve_device(device_raw: Any) -> torch.device:
+def _devices_for(platform: str) -> list[jax.Device]:
+    try:
+        return list(jax.devices(platform))
+    except Exception:
+        return []
+
+
+def _pin_jax_platform(platform: str) -> None:
+    normalized = str(platform).strip().lower()
+    if normalized == "gpu":
+        normalized = "cuda"
+    if normalized not in {"cpu", "cuda"}:
+        return
+
+    os.environ["JAX_PLATFORMS"] = normalized
+    os.environ["JAX_PLATFORM_NAME"] = normalized
+    try:
+        jax.config.update("jax_platforms", normalized)
+    except Exception:
+        pass
+    try:
+        jax.config.update("jax_platform_name", normalized)
+    except Exception:
+        pass
+
+
+def _resolve_device(device_raw: Any) -> jax.Device:
     requested = str(device_raw if device_raw is not None else "auto").strip().lower()
+
     if requested in {"auto", ""}:
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        gpu_devices = _devices_for("gpu")
+        if gpu_devices:
+            return gpu_devices[0]
+        _pin_jax_platform("cpu")
+        return jax.devices("cpu")[0]
+
     if requested in {"cuda", "gpu"}:
-        if not torch.cuda.is_available():
-            raise RuntimeError("Config requested CUDA but no CUDA device is available.")
-        return torch.device("cuda")
+        _pin_jax_platform("cuda")
+        gpu_devices = _devices_for("gpu")
+        if not gpu_devices:
+            raise RuntimeError("Config requested CUDA/GPU but no GPU device is available to JAX.")
+        return gpu_devices[0]
+
     if requested == "cpu":
-        return torch.device("cpu")
-    raise ValueError(f"Unsupported device '{requested}'. Use auto, cuda, or cpu.")
+        _pin_jax_platform("cpu")
+        return jax.devices("cpu")[0]
+
+    raise ValueError(f"Unsupported device '{requested}'. Use auto, cuda/gpu, or cpu.")
+
+
+def _device_label(device: jax.Device) -> str:
+    return f"{device.platform}:{device.id}"
 
 
 def _init_stats(num_classes: int) -> RunningStats:
@@ -88,24 +127,27 @@ def _init_stats(num_classes: int) -> RunningStats:
 
 def _update_stats(
     stats: RunningStats,
-    per_sample_loss: torch.Tensor,
-    preds: torch.Tensor,
-    target: torch.Tensor,
+    per_sample_loss: jax.Array,
+    preds: jax.Array,
+    target: jax.Array,
     num_classes: int,
 ) -> None:
-    correct = (preds == target).to(dtype=torch.float32)
+    loss_np = np.asarray(per_sample_loss, dtype=np.float64)
+    preds_np = np.asarray(preds, dtype=np.int64)
+    target_np = np.asarray(target, dtype=np.int64)
+    correct_np = (preds_np == target_np).astype(np.float64)
 
-    stats.loss_sum += float(per_sample_loss.sum().item())
-    stats.correct_sum += int(correct.sum().item())
-    stats.count_sum += int(target.shape[0])
+    stats.loss_sum += float(np.sum(loss_np))
+    stats.correct_sum += int(np.sum(correct_np))
+    stats.count_sum += int(target_np.shape[0])
 
-    class_count = torch.bincount(target, minlength=num_classes)
-    class_loss = torch.bincount(target, weights=per_sample_loss, minlength=num_classes)
-    class_correct = torch.bincount(target, weights=correct, minlength=num_classes)
+    class_count = np.bincount(target_np, minlength=num_classes).astype(np.float64)
+    class_loss = np.bincount(target_np, weights=loss_np, minlength=num_classes).astype(np.float64)
+    class_correct = np.bincount(target_np, weights=correct_np, minlength=num_classes).astype(np.float64)
 
-    stats.class_count_sum += class_count.detach().cpu().numpy().astype(np.float64)
-    stats.class_loss_sum += class_loss.detach().cpu().numpy().astype(np.float64)
-    stats.class_correct_sum += class_correct.detach().cpu().numpy().astype(np.float64)
+    stats.class_count_sum += class_count
+    stats.class_loss_sum += class_loss
+    stats.class_correct_sum += class_correct
 
 
 def _finalize_stats(stats: RunningStats) -> Dict[str, Any]:
@@ -130,13 +172,13 @@ def _finalize_stats(stats: RunningStats) -> Dict[str, Any]:
 
 def _compute_focus_weight(period_step: int, period_length: int, w_max: float) -> tuple[float, float]:
     t = float(period_step)
-    T = float(period_length)
-    slope = 2.0 * (w_max - 1.0) / T
-    if t < T / 2.0:
+    period = float(period_length)
+    slope = 2.0 * (w_max - 1.0) / period
+    if t < period / 2.0:
         focus_weight = 1.0 + t * slope
     else:
         focus_weight = 2.0 * w_max - t * slope - 1.0
-    phase = t / T
+    phase = t / period
     return focus_weight, phase
 
 
@@ -157,12 +199,12 @@ def _compute_class_probabilities(
 
 
 def _sample_batch_by_class_counts(
-    train_inputs: torch.Tensor,
-    train_targets: torch.Tensor,
+    train_inputs: np.ndarray,
+    train_targets: np.ndarray,
     class_to_indices: Dict[int, np.ndarray],
     class_counts: np.ndarray,
     rng: np.random.Generator,
-) -> tuple[torch.Tensor, torch.Tensor, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     class_counts_int = np.asarray(class_counts, dtype=np.int64)
     sampled_index_parts: list[np.ndarray] = []
     for class_id, count in enumerate(class_counts_int):
@@ -179,39 +221,59 @@ def _sample_batch_by_class_counts(
         )
 
     sampled_indices = np.concatenate(sampled_index_parts, axis=0)
-    index_tensor = torch.from_numpy(sampled_indices)
-    return train_inputs[index_tensor], train_targets[index_tensor], class_counts_int
+    return train_inputs[sampled_indices], train_targets[sampled_indices], class_counts_int
 
 
-@torch.no_grad()
-def evaluate_loader(
-    model: torch.nn.Module,
-    loader: DataLoader,
-    device: torch.device,
+def _iterate_minibatches(
+    inputs: np.ndarray,
+    targets: np.ndarray,
+    batch_size: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    num_samples = int(inputs.shape[0])
+    for start in range(0, num_samples, batch_size):
+        end = min(num_samples, start + batch_size)
+        yield inputs[start:end], targets[start:end]
+
+
+def evaluate_arrays(
+    params: ParamTree,
+    predict_step: Callable[[ParamTree, jax.Array], jax.Array],
+    inputs: np.ndarray,
+    targets: np.ndarray,
+    batch_size: int,
+    device: jax.Device,
     num_classes: int,
 ) -> Dict[str, Any]:
-    model.eval()
     stats = _init_stats(num_classes)
-    use_non_blocking = device.type == "cuda"
 
-    for data, target in loader:
-        data = data.to(device, non_blocking=use_non_blocking)
-        target = target.to(device, non_blocking=use_non_blocking)
-        logits = model(data)
-        per_sample_loss = F.cross_entropy(logits, target, reduction="none")
-        preds = torch.argmax(logits, dim=1)
-        _update_stats(stats, per_sample_loss, preds, target, num_classes)
+    for batch_inputs, batch_targets in _iterate_minibatches(inputs, targets, batch_size):
+        x = jax.device_put(jnp.asarray(batch_inputs, dtype=jnp.float32), device=device)
+        y = jax.device_put(jnp.asarray(batch_targets, dtype=jnp.int32), device=device)
+        logits = predict_step(params, x)
+        per_sample_loss = optax.softmax_cross_entropy_with_integer_labels(logits, y)
+        preds = jnp.argmax(logits, axis=1)
+        _update_stats(stats, per_sample_loss, preds, y, num_classes)
 
     return _finalize_stats(stats)
 
 
+def _l2_penalty(model: JAXModel, params: ParamTree) -> jax.Array:
+    total = jnp.array(0.0, dtype=jnp.float32)
+    for _name, param in model.iter_named_parameters(params):
+        total = total + jnp.sum(jnp.square(param))
+    return total
+
+
 def train_epoch(
-    model: torch.nn.Module,
-    optimizer: torch.optim.Optimizer,
-    train_dataset: TensorDataset,
+    params: ParamTree,
+    opt_state: optax.OptState,
+    optimizer: optax.GradientTransformation,
+    model: JAXModel,
+    train_inputs: np.ndarray,
+    train_targets: np.ndarray,
     class_to_indices: Dict[int, np.ndarray],
     batch_size: int,
-    device: torch.device,
+    device: jax.Device,
     num_classes: int,
     global_step: int,
     steps_this_epoch: int,
@@ -219,14 +281,31 @@ def train_epoch(
     bumps_enabled: bool,
     period_length: int,
     w_max: float,
-    gradient_clipping: float | None,
+    weight_decay: float,
     rng: np.random.Generator,
-) -> tuple[Dict[str, Any], int, Dict[str, Any], np.ndarray]:
-    model.train()
+) -> tuple[ParamTree, optax.OptState, Dict[str, Any], int, Dict[str, Any], np.ndarray]:
     stats = _init_stats(num_classes)
 
-    train_inputs, train_targets = train_dataset.tensors
-    use_non_blocking = device.type == "cuda"
+    @jax.jit
+    def _train_step(
+        step_params: ParamTree,
+        step_opt_state: optax.OptState,
+        batch_x: jax.Array,
+        batch_y: jax.Array,
+    ) -> tuple[ParamTree, optax.OptState, jax.Array, jax.Array]:
+        def _loss_fn(loss_params: ParamTree) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
+            logits = model.apply(loss_params, batch_x)
+            per_sample = optax.softmax_cross_entropy_with_integer_labels(logits, batch_y)
+            data_loss = jnp.mean(per_sample)
+            if weight_decay > 0.0:
+                data_loss = data_loss + 0.5 * weight_decay * _l2_penalty(model, loss_params)
+            return data_loss, (logits, per_sample)
+
+        (_loss, (logits, per_sample_loss)), grads = jax.value_and_grad(_loss_fn, has_aux=True)(step_params)
+        updates, next_opt_state = optimizer.update(grads, step_opt_state, step_params)
+        next_params = optax.apply_updates(step_params, updates)
+        preds = jnp.argmax(logits, axis=1)
+        return next_params, next_opt_state, per_sample_loss, preds
 
     bump_state: Dict[str, Any] = {
         "active": False,
@@ -271,22 +350,12 @@ def train_epoch(
         sampled_count_total = int(sampled_class_counts.sum())
         sampled_distributions.append(sampled_class_counts.astype(np.float64) / float(max(1, sampled_count_total)))
 
-        batch_data = batch_data.to(device, non_blocking=use_non_blocking)
-        batch_target = batch_target.to(device, non_blocking=use_non_blocking)
+        x = jax.device_put(jnp.asarray(batch_data, dtype=jnp.float32), device=device)
+        y = jax.device_put(jnp.asarray(batch_target, dtype=jnp.int32), device=device)
 
-        optimizer.zero_grad(set_to_none=True)
-        logits = model(batch_data)
-        per_sample_loss = F.cross_entropy(logits, batch_target, reduction="none")
-        loss = per_sample_loss.mean()
-        loss.backward()
+        params, opt_state, per_sample_loss, preds = _train_step(params, opt_state, x, y)
 
-        if gradient_clipping is not None:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=gradient_clipping)
-
-        optimizer.step()
-
-        preds = torch.argmax(logits, dim=1)
-        _update_stats(stats, per_sample_loss.detach(), preds.detach(), batch_target.detach(), num_classes)
+        _update_stats(stats, per_sample_loss, preds, y, num_classes)
         global_step += 1
 
     if sampled_distributions:
@@ -294,7 +363,7 @@ def train_epoch(
     else:
         sampled_distribution_arr = np.zeros((0, num_classes), dtype=np.float64)
 
-    return _finalize_stats(stats), global_step, bump_state, sampled_distribution_arr
+    return params, opt_state, _finalize_stats(stats), global_step, bump_state, sampled_distribution_arr
 
 
 def _csv_header(num_classes: int) -> list[str]:
@@ -371,26 +440,25 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
     _set_global_seed(random_seed)
 
     device = _resolve_device(config.get("device", "auto"))
-    if device.type == "cuda":
-        torch.backends.cudnn.benchmark = True
 
     total_steps = int(training_cfg.get("training_steps", training_cfg.get("total_steps", 25000)))
-    steps_per_epoch = int(training_cfg.get("steps_per_epoch", 50))
+    save_metrics_every_n_steps = int(training_cfg.get("save_metrics_every_n_steps", 50))
     batch_size = int(training_cfg.get("batch_size", 128))
     eval_batch_size = int(training_cfg.get("eval_batch_size", batch_size))
-    num_workers = int(training_cfg.get("num_workers", 0))
 
     if total_steps <= 0:
         raise ValueError("training.training_steps must be > 0")
-    if steps_per_epoch <= 0:
-        raise ValueError("training.steps_per_epoch must be > 0")
+    if save_metrics_every_n_steps <= 0:
+        raise ValueError("training.save_metrics_every_n_steps must be > 0")
     if batch_size <= 0:
         raise ValueError("training.batch_size must be > 0")
+    if eval_batch_size <= 0:
+        raise ValueError("training.eval_batch_size must be > 0")
 
     optimizer_name = str(optimizer_cfg.get("optimizer_type", training_cfg.get("optimizer", "adam"))).strip().lower()
     loss_name = str(training_cfg.get("loss", "cross_entropy")).strip().lower()
-    if optimizer_name != "adam":
-        raise ValueError(f"Only Adam optimizer is supported in this runner. Got '{optimizer_name}'.")
+    if optimizer_name not in {"adam", "sgd"}:
+        raise ValueError(f"Unsupported optimizer '{optimizer_name}'. Supported: adam, sgd.")
     if loss_name not in {"cross_entropy", "cross-entropy", "ce"}:
         raise ValueError(f"Only cross-entropy loss is supported in this runner. Got '{loss_name}'.")
 
@@ -398,6 +466,8 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
     beta1 = float(optimizer_cfg.get("beta1", training_cfg.get("beta1", 0.9)))
     beta2 = float(optimizer_cfg.get("beta2", training_cfg.get("beta2", 0.999)))
     eps = float(optimizer_cfg.get("eps", training_cfg.get("eps", 1e-8)))
+    momentum = float(optimizer_cfg.get("momentum", training_cfg.get("momentum", 0.0)))
+    nesterov = _as_bool(optimizer_cfg.get("nesterov", training_cfg.get("nesterov", False)))
     weight_decay = float(
         optimizer_cfg.get(
             "weight_decay",
@@ -425,60 +495,57 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
             f"Configured num_classes ({num_classes}) does not match dataset labels ({dataset_bundle.num_classes})."
         )
 
-    model = build_model(model_cfg, dataset_bundle.input_shape, num_classes, device)
-    nc_layer_specs = build_nc_layer_specs(model)
-    nc_layer_names = [spec.name for spec in nc_layer_specs]
-    optimizer = torch.optim.Adam(
-        model.parameters(),
-        lr=learning_rate,
-        betas=(beta1, beta2),
-        eps=eps,
-        weight_decay=weight_decay,
+    built_model = build_model(
+        model_cfg=model_cfg,
+        input_shape=dataset_bundle.input_shape,
+        num_classes=num_classes,
+        random_seed=random_seed,
     )
+    model = built_model.model
+    params = jax.device_put(built_model.params, device=device)
 
-    test_loader = DataLoader(
-        dataset_bundle.test_dataset,
-        batch_size=eval_batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=(device.type == "cuda"),
-    )
-    # Report metrics from full-dataset evaluation so plots are independent of bump-weighted batches.
-    train_eval_loader = DataLoader(
-        dataset_bundle.train_dataset,
-        batch_size=eval_batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=(device.type == "cuda"),
-    )
-    nc_loader = DataLoader(
-        dataset_bundle.train_dataset,
-        batch_size=eval_batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=(device.type == "cuda"),
-    )
+    if optimizer_name == "adam":
+        base_optimizer = optax.adam(
+            learning_rate=learning_rate,
+            b1=beta1,
+            b2=beta2,
+            eps=eps,
+        )
+    else:
+        base_optimizer = optax.sgd(
+            learning_rate=learning_rate,
+            momentum=momentum,
+            nesterov=nesterov,
+        )
+
+    if gradient_clipping is not None:
+        optimizer = optax.chain(optax.clip_by_global_norm(gradient_clipping), base_optimizer)
+    else:
+        optimizer = base_optimizer
+    opt_state = optimizer.init(params)
 
     csv_path = run_dir / "training_metrics.csv"
     nc_csv_path = run_dir / "nc_metrics.csv"
-    separability_csv_path = run_dir / "separability_metrics.csv"
-    separability_figure_path = run_dir / "separability_measures.png"
     figure_path = run_dir / "training_report.png"
     neural_collapse_figure_path = run_dir / "neural_collapse.png"
-    separability_eval_interval = int(training_cfg.get("separability_eval_interval", 1))
-    separability_probe_l2 = float(training_cfg.get("separability_probe_l2", 1e-3))
-    if separability_eval_interval <= 0:
-        raise ValueError("training.separability_eval_interval must be > 0")
+
     nc_class_pairs = build_nc_class_pairs(num_classes)
     initialize_nc_csv(
         nc_csv_path=nc_csv_path,
-        layer_names=nc_layer_names,
         num_classes=num_classes,
         class_pairs=nc_class_pairs,
     )
-    initialize_separability_csv(separability_csv_path)
+    sep_csv_path = run_dir / "separability_metrics.csv"
+    separability_figure_path = run_dir / "separability_measures.png"
+    initialize_sep_csv(
+        sep_csv_path=sep_csv_path,
+        num_classes=num_classes,
+        class_pairs=nc_class_pairs,
+    )
 
-    total_epochs = int(math.ceil(total_steps / steps_per_epoch))
+    predict_step = jax.jit(lambda step_params, batch_x: model.apply(step_params, batch_x))
+
+    total_epochs = int(math.ceil(total_steps / save_metrics_every_n_steps))
     global_step = 0
     tpt_reached = False
     tpt_step = -1
@@ -504,15 +571,18 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
         f.flush()
 
         for epoch in range(1, total_epochs + 1):
-            steps_this_epoch = min(steps_per_epoch, total_steps - global_step)
+            steps_this_epoch = min(save_metrics_every_n_steps, total_steps - global_step)
             if steps_this_epoch <= 0:
                 break
 
             bumps_enabled = bumps_at_tpt if tpt_reached else bumps_before_tpt
-            _step_train_metrics, global_step, bump_state, step_distributions = train_epoch(
-                model=model,
+            params, opt_state, _step_train_metrics, global_step, bump_state, step_distributions = train_epoch(
+                params=params,
+                opt_state=opt_state,
                 optimizer=optimizer,
-                train_dataset=dataset_bundle.train_dataset,
+                model=model,
+                train_inputs=dataset_bundle.train_inputs,
+                train_targets=dataset_bundle.train_targets,
                 class_to_indices=dataset_bundle.class_to_indices,
                 batch_size=batch_size,
                 device=device,
@@ -523,51 +593,64 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
                 bumps_enabled=bumps_enabled,
                 period_length=period_length,
                 w_max=w_max,
-                gradient_clipping=gradient_clipping,
+                weight_decay=weight_decay,
                 rng=rng,
             )
             if step_distributions.size > 0:
                 class_distribution_history.extend(step_distributions)
-            train_metrics = evaluate_loader(model, train_eval_loader, device, num_classes)
-            test_metrics = evaluate_loader(model, test_loader, device, num_classes)
+
+            train_metrics = evaluate_arrays(
+                params=params,
+                predict_step=predict_step,
+                inputs=dataset_bundle.train_inputs,
+                targets=dataset_bundle.train_targets,
+                batch_size=eval_batch_size,
+                device=device,
+                num_classes=num_classes,
+            )
+            test_metrics = evaluate_arrays(
+                params=params,
+                predict_step=predict_step,
+                inputs=dataset_bundle.test_inputs,
+                targets=dataset_bundle.test_targets,
+                batch_size=eval_batch_size,
+                device=device,
+                num_classes=num_classes,
+            )
 
             nc_raw = collect_nc_raw_epoch(
                 model=model,
-                loader=nc_loader,
-                device=device,
+                params=params,
+                inputs=dataset_bundle.train_inputs,
+                targets=dataset_bundle.train_targets,
                 num_classes=num_classes,
                 class_pairs=nc_class_pairs,
-                layer_specs=nc_layer_specs,
+                eval_batch_size=eval_batch_size,
             )
             append_nc_csv_row(
                 nc_csv_path=nc_csv_path,
                 epoch=epoch,
                 global_step=global_step,
                 raw=nc_raw,
-                layer_names=nc_layer_names,
                 num_classes=num_classes,
             )
 
-            should_eval_separability = (
-                epoch == 1
-                or epoch == total_epochs
-                or (epoch % separability_eval_interval == 0)
+            sep_raw: SepEpochRaw = collect_sep_raw_epoch(
+                model=model,
+                params=params,
+                inputs=dataset_bundle.train_inputs,
+                targets=dataset_bundle.train_targets,
+                num_classes=num_classes,
+                class_pairs=nc_class_pairs,
+                eval_batch_size=eval_batch_size,
             )
-            if should_eval_separability:
-                separability_raw = collect_separability_epoch(
-                    model=model,
-                    train_loader=train_eval_loader,
-                    test_loader=test_loader,
-                    device=device,
-                    num_classes=num_classes,
-                    probe_l2_reg=separability_probe_l2,
-                )
-                append_separability_csv_row(
-                    csv_path=separability_csv_path,
-                    epoch=epoch,
-                    global_step=global_step,
-                    raw=separability_raw,
-                )
+            append_sep_csv_row(
+                sep_csv_path=sep_csv_path,
+                epoch=epoch,
+                global_step=global_step,
+                raw=sep_raw,
+                num_classes=num_classes,
+            )
 
             if (not tpt_reached) and bool(train_metrics.get("zero_training_error", False)):
                 tpt_reached = True
@@ -622,20 +705,15 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
     finalize_nc_metrics(
         nc_csv_path=nc_csv_path,
         output_path=neural_collapse_figure_path,
-        layer_names=nc_layer_names,
         num_classes=num_classes,
         class_pairs=nc_class_pairs,
         tpt_step=tpt_step if tpt_reached else -1,
     )
-    neural_collapse_weights_figure_path = neural_collapse_figure_path.with_name(
-        f"{neural_collapse_figure_path.stem}_weights{neural_collapse_figure_path.suffix}"
-    )
-    neural_collapse_bias_figure_path = neural_collapse_figure_path.with_name(
-        f"{neural_collapse_figure_path.stem}_bias{neural_collapse_figure_path.suffix}"
-    )
-    finalize_separability_metrics(
-        csv_path=separability_csv_path,
+    finalize_sep_metrics(
+        sep_csv_path=sep_csv_path,
         output_path=separability_figure_path,
+        num_classes=num_classes,
+        class_pairs=nc_class_pairs,
         tpt_step=tpt_step if tpt_reached else -1,
     )
 
@@ -644,27 +722,29 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
         boundary_figure_path = run_dir / "spiral_decision_boundaries.png"
         plot_spiral_decision_boundaries(
             model=model,
-            train_dataset=dataset_bundle.train_dataset,
-            test_dataset=dataset_bundle.test_dataset,
+            params=params,
+            train_inputs=dataset_bundle.train_inputs,
+            train_targets=dataset_bundle.train_targets,
+            test_inputs=dataset_bundle.test_inputs,
+            test_targets=dataset_bundle.test_targets,
             output_path=boundary_figure_path,
             title=f"{run_label} | {dataset_name} | {architecture} | Decision Boundaries",
         )
 
     summary = {
         "run_label": run_label,
-        "device": str(device),
+        "device": _device_label(device),
+        "optimizer": optimizer_name,
+        "init_type": model.init_type,
         "total_steps": total_steps,
-        "steps_per_epoch": steps_per_epoch,
+        "save_metrics_every_n_steps": save_metrics_every_n_steps,
         "epochs": total_epochs,
         "tpt_reached": bool(tpt_reached),
         "tpt_step": int(tpt_step),
         "csv_path": str(csv_path),
         "nc_csv_path": str(nc_csv_path),
-        "separability_csv_path": str(separability_csv_path),
         "figure_path": str(figure_path),
         "neural_collapse_figure_path": str(neural_collapse_figure_path),
-        "neural_collapse_weights_figure_path": str(neural_collapse_weights_figure_path),
-        "neural_collapse_bias_figure_path": str(neural_collapse_bias_figure_path),
         "separability_figure_path": str(separability_figure_path),
         "distribution_figure_path": str(distribution_figure_path),
         "decision_boundary_path": str(boundary_figure_path) if boundary_figure_path is not None else None,

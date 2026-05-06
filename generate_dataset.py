@@ -1,21 +1,33 @@
 
 from __future__ import annotations
 
+import gzip
+import shutil
+import struct
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
-import torch
-from torch.utils.data import TensorDataset
-from torchvision import datasets
+
+
+MNIST_BASE_URL = "https://storage.googleapis.com/cvdf-datasets/mnist"
+MNIST_FILES = {
+    "train_images": "train-images-idx3-ubyte",
+    "train_labels": "train-labels-idx1-ubyte",
+    "test_images": "t10k-images-idx3-ubyte",
+    "test_labels": "t10k-labels-idx1-ubyte",
+}
 
 
 @dataclass
 class DatasetBundle:
-    train_dataset: TensorDataset
-    test_dataset: TensorDataset
+    train_inputs: np.ndarray
+    train_targets: np.ndarray
+    test_inputs: np.ndarray
+    test_targets: np.ndarray
     class_to_indices: Dict[int, np.ndarray]
     num_classes: int
     input_shape: tuple[int, ...]
@@ -41,7 +53,6 @@ def _validate_spiral_data_config(data_cfg: dict) -> None:
     points_per_class = int(data_cfg.get("points_per_class", 1000))
     revolutions = float(data_cfg.get("revolutions", 4.0))
     noise_std = float(data_cfg.get("noise_std", 0.1))
-    test_ratio = float(data_cfg.get("test_ratio", 0.25))
     min_radius = float(data_cfg.get("min_radius", 0.05))
 
     if num_classes < 2:
@@ -52,8 +63,6 @@ def _validate_spiral_data_config(data_cfg: dict) -> None:
         raise ValueError("For spiral data, data.revolutions must be > 0.")
     if noise_std < 0:
         raise ValueError("For spiral data, data.noise_std must be >= 0.")
-    if not (0.0 < test_ratio < 1.0):
-        raise ValueError("For spiral data, data.test_ratio must be in (0, 1).")
     if min_radius <= 0 or min_radius >= 1.0:
         raise ValueError("For spiral data, data.min_radius must be in (0, 1).")
 
@@ -64,9 +73,9 @@ def _validate_spiral_data_config(data_cfg: dict) -> None:
         )
 
 
-def build_class_index_map(labels: torch.Tensor, num_classes: int) -> Dict[int, np.ndarray]:
+def build_class_index_map(labels: np.ndarray, num_classes: int) -> Dict[int, np.ndarray]:
     class_to_indices: Dict[int, np.ndarray] = {}
-    labels_np = labels.detach().cpu().numpy()
+    labels_np = np.asarray(labels, dtype=np.int64)
     for class_id in range(num_classes):
         class_indices = np.where(labels_np == class_id)[0].astype(np.int64)
         if class_indices.size == 0:
@@ -113,41 +122,15 @@ def generate_spiral_data(
     return x_all, y_all
 
 
-def create_train_test_split(
-    x: np.ndarray,
-    y: np.ndarray,
-    test_ratio: float = 0.25,
-    random_seed: int = 0,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    rng = np.random.default_rng(random_seed)
-    classes = np.unique(y)
-
-    train_idx = []
-    test_idx = []
-    for class_id in classes:
-        idx = np.where(y == class_id)[0]
-        rng.shuffle(idx)
-        n_test = int(len(idx) * test_ratio)
-        test_idx.append(idx[:n_test])
-        train_idx.append(idx[n_test:])
-
-    train_idx = np.concatenate(train_idx)
-    test_idx = np.concatenate(test_idx)
-    rng.shuffle(train_idx)
-    rng.shuffle(test_idx)
-
-    return x[train_idx], y[train_idx], x[test_idx], y[test_idx]
-
-
 def save_mnist_visualizations(
-    x_train: torch.Tensor,
-    y_train: torch.Tensor,
-    x_test: torch.Tensor,
-    y_test: torch.Tensor,
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    x_test: np.ndarray,
+    y_test: np.ndarray,
     out_dir: Path,
 ) -> None:
-    train_images = x_train[:, 0].detach().cpu().numpy()
-    train_labels = y_train.detach().cpu().numpy()
+    train_images = x_train[:, 0]
+    train_labels = y_train
 
     fig, axes = plt.subplots(2, 5, figsize=(12, 6))
     fig.suptitle("MNIST Training Dataset Samples", fontsize=16)
@@ -163,7 +146,7 @@ def save_mnist_visualizations(
     plt.close()
 
     train_counts = np.bincount(train_labels, minlength=10)
-    test_counts = np.bincount(y_test.detach().cpu().numpy(), minlength=10)
+    test_counts = np.bincount(y_test, minlength=10)
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
     ax1.bar(np.arange(10), train_counts, alpha=0.8, color="skyblue")
@@ -229,32 +212,79 @@ def save_spiral_visualizations(
     plt.close()
 
 
+def _ensure_mnist_raw_files(data_dir: Path) -> dict[str, Path]:
+    raw_dir = data_dir / "MNIST" / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+
+    resolved: dict[str, Path] = {}
+    for key, filename in MNIST_FILES.items():
+        target = raw_dir / filename
+        if not target.exists():
+            gz_target = raw_dir / f"{filename}.gz"
+            if not gz_target.exists():
+                url = f"{MNIST_BASE_URL}/{filename}.gz"
+                urllib.request.urlretrieve(url, gz_target)
+            with gzip.open(gz_target, "rb") as src, open(target, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+        resolved[key] = target
+    return resolved
+
+
+def _read_mnist_idx_images(path: Path) -> np.ndarray:
+    with open(path, "rb") as f:
+        magic, num_items, rows, cols = struct.unpack(">IIII", f.read(16))
+        if magic != 2051:
+            raise ValueError(f"Invalid MNIST image file: {path}")
+        payload = f.read()
+    arr = np.frombuffer(payload, dtype=np.uint8)
+    if arr.size != num_items * rows * cols:
+        raise ValueError(f"Corrupted MNIST image file: {path}")
+    return arr.reshape(num_items, rows, cols)
+
+
+def _read_mnist_idx_labels(path: Path) -> np.ndarray:
+    with open(path, "rb") as f:
+        magic, num_items = struct.unpack(">II", f.read(8))
+        if magic != 2049:
+            raise ValueError(f"Invalid MNIST label file: {path}")
+        payload = f.read()
+    arr = np.frombuffer(payload, dtype=np.uint8)
+    if arr.size != num_items:
+        raise ValueError(f"Corrupted MNIST label file: {path}")
+    return arr
+
+
 def _load_mnist_bundle(data_cfg: dict, output_dir: Path) -> DatasetBundle:
     data_dir = Path(str(data_cfg.get("data_dir", "./data"))).resolve()
     data_dir.mkdir(parents=True, exist_ok=True)
 
-    train_raw = datasets.MNIST(str(data_dir), train=True, download=True)
-    test_raw = datasets.MNIST(str(data_dir), train=False, download=True)
+    paths = _ensure_mnist_raw_files(data_dir)
+    train_images = _read_mnist_idx_images(paths["train_images"])
+    train_labels = _read_mnist_idx_labels(paths["train_labels"])
+    test_images = _read_mnist_idx_images(paths["test_images"])
+    test_labels = _read_mnist_idx_labels(paths["test_labels"])
 
-    x_train = train_raw.data.float().unsqueeze(1) / 255.0
-    x_test = test_raw.data.float().unsqueeze(1) / 255.0
+    x_train = train_images.astype(np.float32)[:, None, :, :] / 255.0
+    x_test = test_images.astype(np.float32)[:, None, :, :] / 255.0
     x_train = (x_train - 0.1307) / 0.3081
     x_test = (x_test - 0.1307) / 0.3081
 
-    y_train = train_raw.targets.long()
-    y_test = test_raw.targets.long()
+    y_train = train_labels.astype(np.int64)
+    y_test = test_labels.astype(np.int64)
+
+    num_classes = int(data_cfg.get("num_classes", 10))
+    if num_classes != 10:
+        raise ValueError("MNIST loader expects data.num_classes=10.")
 
     save_mnist_visualizations(x_train, y_train, x_test, y_test, output_dir)
 
-    train_dataset = TensorDataset(x_train, y_train)
-    test_dataset = TensorDataset(x_test, y_test)
-
-    num_classes = int(data_cfg.get("num_classes", 10))
     class_to_indices = build_class_index_map(y_train, num_classes)
     input_shape = tuple(x_train.shape[1:])
     return DatasetBundle(
-        train_dataset=train_dataset,
-        test_dataset=test_dataset,
+        train_inputs=x_train,
+        train_targets=y_train,
+        test_inputs=x_test,
+        test_targets=y_test,
         class_to_indices=class_to_indices,
         num_classes=num_classes,
         input_shape=input_shape,
@@ -264,38 +294,44 @@ def _load_mnist_bundle(data_cfg: dict, output_dir: Path) -> DatasetBundle:
 def _load_spiral_bundle(data_cfg: dict, output_dir: Path) -> DatasetBundle:
     _validate_spiral_data_config(data_cfg)
     num_classes = int(data_cfg.get("num_classes", 3))
-    x_full, y_full = generate_spiral_data(
-        points_per_class=int(data_cfg.get("points_per_class", 1000)),
+    points_per_class = int(data_cfg.get("points_per_class", 1000))
+    random_seed = int(data_cfg.get("random_seed", 0))
+
+    x_train, y_train = generate_spiral_data(
+        points_per_class=points_per_class,
         num_classes=num_classes,
         revolutions=float(data_cfg.get("revolutions", 4.0)),
         noise_std=float(data_cfg.get("noise_std", 0.1)),
-        random_seed=int(data_cfg.get("random_seed", 0)),
+        random_seed=random_seed,
+        angular_offsets=_parse_angular_offsets(data_cfg.get("angular_offsets")),
+        randomize_offsets=bool(data_cfg.get("randomize_offsets", False)),
+        min_radius=float(data_cfg.get("min_radius", 0.05)),
+    )
+    x_test, y_test = generate_spiral_data(
+        points_per_class=points_per_class,
+        num_classes=num_classes,
+        revolutions=float(data_cfg.get("revolutions", 4.0)),
+        noise_std=float(data_cfg.get("noise_std", 0.1)),
+        random_seed=random_seed + 1,
         angular_offsets=_parse_angular_offsets(data_cfg.get("angular_offsets")),
         randomize_offsets=bool(data_cfg.get("randomize_offsets", False)),
         min_radius=float(data_cfg.get("min_radius", 0.05)),
     )
 
-    x_train, y_train, x_test, y_test = create_train_test_split(
-        x_full,
-        y_full,
-        test_ratio=float(data_cfg.get("test_ratio", 0.25)),
-        random_seed=int(data_cfg.get("random_seed", 0)),
-    )
-
     save_spiral_visualizations(x_train, y_train, x_test, y_test, num_classes, output_dir)
 
-    x_train_t = torch.from_numpy(x_train).float()
-    x_test_t = torch.from_numpy(x_test).float()
-    y_train_t = torch.from_numpy(y_train).long()
-    y_test_t = torch.from_numpy(y_test).long()
+    x_train_arr = np.asarray(x_train, dtype=np.float32)
+    x_test_arr = np.asarray(x_test, dtype=np.float32)
+    y_train_arr = np.asarray(y_train, dtype=np.int64)
+    y_test_arr = np.asarray(y_test, dtype=np.int64)
 
-    train_dataset = TensorDataset(x_train_t, y_train_t)
-    test_dataset = TensorDataset(x_test_t, y_test_t)
-    class_to_indices = build_class_index_map(y_train_t, num_classes)
+    class_to_indices = build_class_index_map(y_train_arr, num_classes)
 
     return DatasetBundle(
-        train_dataset=train_dataset,
-        test_dataset=test_dataset,
+        train_inputs=x_train_arr,
+        train_targets=y_train_arr,
+        test_inputs=x_test_arr,
+        test_targets=y_test_arr,
         class_to_indices=class_to_indices,
         num_classes=num_classes,
         input_shape=(2,),
