@@ -35,14 +35,14 @@ optimizer:
   momentum: 0.9
   optimizer_type: adam
 dynamics:
-  bumps_before_TPT: false
+  bumps_before_TPT: true
   bumps_at_TPT: false
   period_length: 5000
-  w_max: 1.0
-  amplitude: 1.0
+  w_max: 70.0
   # Optional class order for bump focus (length must equal num_classes; duplicates allowed).
   # Example: [1,0,1] repeats classes and can skip others.
-  bump_order: null
+  bump_order: [1,1,0]
+  amplitude: 1.0
   tpt_accuracy_threshold: 1.0
 output:
   output_dir: /data/samuel_lozano/dynamical-sgd

@@ -4,23 +4,23 @@ data:
   dataset_name: spiral
   data_dir: ./data
   num_classes: 3
-  points_per_class: 1000
-  revolutions: 5.0
-  noise_std: 0.1
-  min_radius: 0.02
+  points_per_class: 100
+  revolutions: 4.0
+  noise_std: 0.2
+  min_radius: 0.01
   random_seed: 0
   # Optional explicit initial class angles in degrees.
   # Keep null for homogeneous spacing; provide a list (length = num_classes)
   # if you want different initial angles.
   angular_offsets: null
 model:
-  architecture: mlp
-  init_type: glorot
+  architecture: mlp_relu
+  init_type: lecun
   nn_width: 50
   num_hidden_layers: 1
   use_bias: true
 training:
-  training_steps: 200000
+  training_steps: 150000
   save_metrics_every_n_steps: 50
   batch_size: 200
   random_seed: 42
@@ -35,7 +35,7 @@ optimizer:
   momentum: 0.9
   optimizer_type: adam
 dynamics:
-  bumps_before_TPT: true
+  bumps_before_TPT: false
   bumps_at_TPT: true
   period_length: 5000
   w_max: 70.0

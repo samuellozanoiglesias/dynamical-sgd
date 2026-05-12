@@ -15,6 +15,13 @@ import numpy as np
 import optax
 
 from generate_dataset import DatasetBundle, build_dataset_bundle
+from classifier_metrics import (
+    append_classifier_csv_row,
+    collect_advanced_classifier_metrics,
+    collect_classifier_epoch,
+    finalize_classifier_dashboard,
+    initialize_classifier_csv,
+)
 from metrics import (
     plot_example_distribution_dynamics,
     plot_spiral_decision_boundaries,
@@ -33,6 +40,13 @@ from separability_measures import (
     collect_sep_raw_epoch,
     finalize_sep_metrics,
     initialize_sep_csv,
+)
+from PCA_analysis import (
+    append_pca_csv_row,
+    collect_pca_epoch,
+    finalize_pca_analysis,
+    initialize_pca_csv,
+    normalize_projected_dims,
 )
 from model import JAXModel, ParamTree, build_model
 
@@ -53,6 +67,41 @@ def _as_bool(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return bool(value)
+
+
+def _parse_bump_order(raw: Any) -> list[int] | None:
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        text = raw.strip()
+        if text == "" or text.lower() in {"none", "null"}:
+            return None
+        if text.startswith("[") and text.endswith("]"):
+            text = text[1:-1]
+        if text.strip() == "":
+            return []
+        parts = [part.strip() for part in text.split(",") if part.strip()]
+        return [int(part) for part in parts]
+    if isinstance(raw, (list, tuple, np.ndarray)):
+        return [int(part) for part in raw]
+    raise ValueError("dynamics.bump_order must be null, a list of ints, or a comma-separated string.")
+
+
+def _validate_bump_order(bump_order: list[int] | None, num_classes: int) -> list[int] | None:
+    if bump_order is None:
+        return None
+    if len(bump_order) != num_classes:
+        raise ValueError(
+            f"dynamics.bump_order must have length equal to num_classes ({num_classes}). "
+            f"Got length {len(bump_order)}."
+        )
+    for idx, class_id in enumerate(bump_order):
+        if class_id < 0 or class_id >= num_classes:
+            raise ValueError(
+                f"dynamics.bump_order has invalid class id {class_id} at index {idx}. "
+                f"Valid range is [0, {num_classes - 1}]."
+            )
+    return bump_order
 
 
 def _set_global_seed(seed: int) -> None:
@@ -187,8 +236,13 @@ def _compute_class_probabilities(
     num_classes: int,
     period_length: int,
     w_max: float,
+    bump_order: list[int] | None = None,
 ) -> tuple[np.ndarray, int, float, float]:
-    focus_class = (step // period_length) % num_classes
+    if bump_order is None:
+        focus_class = (step // period_length) % num_classes
+    else:
+        cycle_index = (step // period_length) % len(bump_order)
+        focus_class = int(bump_order[cycle_index])
     period_step = step % period_length
     focus_weight, bump_phase = _compute_focus_weight(period_step, period_length, w_max)
 
@@ -235,6 +289,40 @@ def _iterate_minibatches(
         yield inputs[start:end], targets[start:end]
 
 
+def _collect_pre_classifier_outputs(
+    model: JAXModel,
+    params: ParamTree,
+    inputs: np.ndarray,
+    targets: np.ndarray,
+    batch_size: int,
+    device: jax.Device,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    features: list[np.ndarray] = []
+    logits_list: list[np.ndarray] = []
+    labels: list[np.ndarray] = []
+
+    for batch_inputs, batch_targets in _iterate_minibatches(inputs, targets, batch_size):
+        x = jax.device_put(jnp.asarray(batch_inputs, dtype=jnp.float32), device=device)
+        logits, intermediates = model.apply(params, x, return_intermediates=True)
+        pre_classifier = intermediates.get("pre_classifier")
+        if pre_classifier is None:
+            raise RuntimeError("Failed to capture activations for layer 'pre_classifier'.")
+        features.append(np.asarray(pre_classifier, dtype=np.float64))
+        logits_list.append(np.asarray(logits, dtype=np.float64))
+        labels.append(np.asarray(batch_targets, dtype=np.int64))
+
+    if not features:
+        raise ValueError("No samples provided for pre-classifier collection.")
+
+    features_arr = np.concatenate(features, axis=0)
+    logits_arr = np.concatenate(logits_list, axis=0)
+    labels_arr = np.concatenate(labels, axis=0)
+    if features_arr.shape[0] != inputs.shape[0]:
+        raise ValueError("Collected activations do not match expected sample count.")
+
+    return features_arr, logits_arr, labels_arr
+
+
 def evaluate_arrays(
     params: ParamTree,
     predict_step: Callable[[ParamTree, jax.Array], jax.Array],
@@ -264,6 +352,19 @@ def _l2_penalty(model: JAXModel, params: ParamTree) -> jax.Array:
     return total
 
 
+def _classifier_weight_grads(
+    pre_classifier: jax.Array,
+    logits: jax.Array,
+    targets: jax.Array,
+    num_classes: int,
+) -> jax.Array:
+    probs = jax.nn.softmax(logits, axis=1)
+    one_hot = jax.nn.one_hot(targets, num_classes, dtype=logits.dtype)
+    diff = probs - one_hot
+    grad_kernel = jnp.einsum("bi,bj->bij", pre_classifier, diff)
+    return jnp.transpose(grad_kernel, (0, 2, 1))
+
+
 def train_epoch(
     params: ParamTree,
     opt_state: optax.OptState,
@@ -281,9 +382,22 @@ def train_epoch(
     bumps_enabled: bool,
     period_length: int,
     w_max: float,
+    bump_order: list[int] | None,
     weight_decay: float,
+    cumulative_weight_distance: float,
+    prev_params: ParamTree,
     rng: np.random.Generator,
-) -> tuple[ParamTree, optax.OptState, Dict[str, Any], int, Dict[str, Any], np.ndarray]:
+) -> tuple[
+    ParamTree,
+    optax.OptState,
+    Dict[str, Any],
+    int,
+    Dict[str, Any],
+    np.ndarray,
+    float,
+    ParamTree,
+    jax.Array | None,
+]:
     stats = _init_stats(num_classes)
 
     @jax.jit
@@ -292,20 +406,24 @@ def train_epoch(
         step_opt_state: optax.OptState,
         batch_x: jax.Array,
         batch_y: jax.Array,
-    ) -> tuple[ParamTree, optax.OptState, jax.Array, jax.Array]:
-        def _loss_fn(loss_params: ParamTree) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
-            logits = model.apply(loss_params, batch_x)
+    ) -> tuple[ParamTree, optax.OptState, jax.Array, jax.Array, jax.Array]:
+        def _loss_fn(loss_params: ParamTree) -> tuple[jax.Array, tuple[jax.Array, jax.Array, jax.Array]]:
+            logits, intermediates = model.apply(loss_params, batch_x, return_intermediates=True)
+            pre_classifier = intermediates["pre_classifier"]
             per_sample = optax.softmax_cross_entropy_with_integer_labels(logits, batch_y)
             data_loss = jnp.mean(per_sample)
             if weight_decay > 0.0:
                 data_loss = data_loss + 0.5 * weight_decay * _l2_penalty(model, loss_params)
-            return data_loss, (logits, per_sample)
+            return data_loss, (logits, per_sample, pre_classifier)
 
-        (_loss, (logits, per_sample_loss)), grads = jax.value_and_grad(_loss_fn, has_aux=True)(step_params)
+        (_loss, (logits, per_sample_loss, pre_classifier)), grads = jax.value_and_grad(_loss_fn, has_aux=True)(
+            step_params
+        )
         updates, next_opt_state = optimizer.update(grads, step_opt_state, step_params)
         next_params = optax.apply_updates(step_params, updates)
         preds = jnp.argmax(logits, axis=1)
-        return next_params, next_opt_state, per_sample_loss, preds
+        classifier_grads = _classifier_weight_grads(pre_classifier, logits, batch_y, num_classes)
+        return next_params, next_opt_state, per_sample_loss, preds, classifier_grads
 
     bump_state: Dict[str, Any] = {
         "active": False,
@@ -314,6 +432,7 @@ def train_epoch(
         "phase": 0.0,
     }
     sampled_distributions: list[np.ndarray] = []
+    last_classifier_grads: jax.Array | None = None
 
     for _ in range(steps_this_epoch):
         in_uniform_tail = global_step >= (0.95 * float(total_steps))
@@ -323,6 +442,7 @@ def train_epoch(
                 num_classes=num_classes,
                 period_length=period_length,
                 w_max=w_max,
+                bump_order=bump_order,
             )
             bump_state = {
                 "active": True,
@@ -353,7 +473,13 @@ def train_epoch(
         x = jax.device_put(jnp.asarray(batch_data, dtype=jnp.float32), device=device)
         y = jax.device_put(jnp.asarray(batch_target, dtype=jnp.int32), device=device)
 
-        params, opt_state, per_sample_loss, preds = _train_step(params, opt_state, x, y)
+        prev_w = model.classifier_weight_matrix(prev_params)
+        params, opt_state, per_sample_loss, preds, classifier_grads = _train_step(params, opt_state, x, y)
+        current_w = model.classifier_weight_matrix(params)
+        dist = float(jnp.linalg.norm(current_w - prev_w))
+        cumulative_weight_distance += dist
+        prev_params = params
+        last_classifier_grads = classifier_grads
 
         _update_stats(stats, per_sample_loss, preds, y, num_classes)
         global_step += 1
@@ -363,7 +489,17 @@ def train_epoch(
     else:
         sampled_distribution_arr = np.zeros((0, num_classes), dtype=np.float64)
 
-    return params, opt_state, _finalize_stats(stats), global_step, bump_state, sampled_distribution_arr
+    return (
+        params,
+        opt_state,
+        _finalize_stats(stats),
+        global_step,
+        bump_state,
+        sampled_distribution_arr,
+        cumulative_weight_distance,
+        prev_params,
+        last_classifier_grads,
+    )
 
 
 def _csv_header(num_classes: int) -> list[str]:
@@ -495,6 +631,8 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
             f"Configured num_classes ({num_classes}) does not match dataset labels ({dataset_bundle.num_classes})."
         )
 
+    bump_order = _validate_bump_order(_parse_bump_order(dynamics_cfg.get("bump_order")), num_classes)
+
     built_model = build_model(
         model_cfg=model_cfg,
         input_shape=dataset_bundle.input_shape,
@@ -503,6 +641,9 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
     )
     model = built_model.model
     params = jax.device_put(built_model.params, device=device)
+    initial_params = params
+    cumulative_weight_distance = 0.0
+    prev_params = params
 
     if optimizer_name == "adam":
         base_optimizer = optax.adam(
@@ -543,6 +684,26 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
         class_pairs=nc_class_pairs,
     )
 
+    classifier_csv_path = run_dir / "classifier_metrics.csv"
+    classifier_figure_path = run_dir / "classifier_metrics.png"
+    initialize_classifier_csv(
+        csv_path=classifier_csv_path,
+        num_classes=num_classes,
+    )
+
+    analysis_cfg = config.get("analysis", {})
+    pca_cfg = analysis_cfg.get("pca", {})
+    feature_dim = int(model.classifier_weight_matrix(params).shape[1])
+    projected_dims = normalize_projected_dims(pca_cfg.get("projected_dims", [1, 2, 3, 5]), feature_dim)
+    pca_csv_path = run_dir / "pca_analysis.csv"
+    pca_variance_path = run_dir / "pca_explained_variance.png"
+    pca_projected_path = run_dir / "pca_projected_metrics.png"
+    initialize_pca_csv(
+        csv_path=pca_csv_path,
+        feature_dim=feature_dim,
+        projected_dims=projected_dims,
+    )
+
     predict_step = jax.jit(lambda step_params, batch_x: model.apply(step_params, batch_x))
 
     total_epochs = int(math.ceil(total_steps / save_metrics_every_n_steps))
@@ -576,7 +737,17 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
                 break
 
             bumps_enabled = bumps_at_tpt if tpt_reached else bumps_before_tpt
-            params, opt_state, _step_train_metrics, global_step, bump_state, step_distributions = train_epoch(
+            (
+                params,
+                opt_state,
+                _step_train_metrics,
+                global_step,
+                bump_state,
+                step_distributions,
+                cumulative_weight_distance,
+                prev_params,
+                last_classifier_grads,
+            ) = train_epoch(
                 params=params,
                 opt_state=opt_state,
                 optimizer=optimizer,
@@ -593,7 +764,10 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
                 bumps_enabled=bumps_enabled,
                 period_length=period_length,
                 w_max=w_max,
+                bump_order=bump_order,
                 weight_decay=weight_decay,
+                cumulative_weight_distance=cumulative_weight_distance,
+                prev_params=prev_params,
                 rng=rng,
             )
             if step_distributions.size > 0:
@@ -650,6 +824,55 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
                 global_step=global_step,
                 raw=sep_raw,
                 num_classes=num_classes,
+            )
+
+            pre_classifier, logits, labels = _collect_pre_classifier_outputs(
+                model=model,
+                params=params,
+                inputs=dataset_bundle.train_inputs,
+                targets=dataset_bundle.train_targets,
+                batch_size=eval_batch_size,
+                device=device,
+            )
+            weight_matrix = np.asarray(model.classifier_weight_matrix(params), dtype=np.float64)
+            classifier_raw = collect_classifier_epoch(
+                pre_classifier=pre_classifier,
+                logits=logits,
+                targets=labels,
+                weight_matrix=weight_matrix,
+            )
+            advanced_classifier_raw = collect_advanced_classifier_metrics(
+                params=params,
+                initial_params=initial_params,
+                cumulative_weight_distance=cumulative_weight_distance,
+                logits=logits,
+                targets=labels,
+                grads=last_classifier_grads,
+            )
+            append_classifier_csv_row(
+                csv_path=classifier_csv_path,
+                epoch=epoch,
+                global_step=global_step,
+                raw=classifier_raw,
+                num_classes=num_classes,
+                advanced_raw=advanced_classifier_raw,
+            )
+
+            pca_raw = collect_pca_epoch(
+                pre_classifier=pre_classifier,
+                targets=labels,
+                num_classes=num_classes,
+                class_pairs=nc_class_pairs,
+                eval_batch_size=eval_batch_size,
+                projected_dims=projected_dims,
+            )
+            append_pca_csv_row(
+                csv_path=pca_csv_path,
+                epoch=epoch,
+                global_step=global_step,
+                raw=pca_raw,
+                feature_dim=feature_dim,
+                projected_dims=projected_dims,
             )
 
             if (not tpt_reached) and bool(train_metrics.get("zero_training_error", False)):
@@ -716,6 +939,20 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
         class_pairs=nc_class_pairs,
         tpt_step=tpt_step if tpt_reached else -1,
     )
+    finalize_classifier_dashboard(
+        csv_path=classifier_csv_path,
+        output_path=classifier_figure_path,
+        num_classes=num_classes,
+        tpt_step=tpt_step if tpt_reached else -1,
+    )
+    finalize_pca_analysis(
+        csv_path=pca_csv_path,
+        variance_output_path=pca_variance_path,
+        projected_output_path=pca_projected_path,
+        feature_dim=feature_dim,
+        projected_dims=projected_dims,
+        tpt_step=tpt_step if tpt_reached else -1,
+    )
 
     boundary_figure_path: Path | None = None
     if dataset_name.strip().lower() == "spiral":
@@ -746,6 +983,11 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
         "figure_path": str(figure_path),
         "neural_collapse_figure_path": str(neural_collapse_figure_path),
         "separability_figure_path": str(separability_figure_path),
+        "classifier_csv_path": str(classifier_csv_path),
+        "classifier_figure_path": str(classifier_figure_path),
+        "pca_csv_path": str(pca_csv_path),
+        "pca_variance_path": str(pca_variance_path),
+        "pca_projected_path": str(pca_projected_path),
         "distribution_figure_path": str(distribution_figure_path),
         "decision_boundary_path": str(boundary_figure_path) if boundary_figure_path is not None else None,
         "final_train_loss": float(last_train_metrics["loss"]),
