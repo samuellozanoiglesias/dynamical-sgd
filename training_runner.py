@@ -69,6 +69,52 @@ def _as_bool(value: Any) -> bool:
     return bool(value)
 
 
+def _normalize_freeze_part(raw: Any) -> str | None:
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        text = raw.strip().lower()
+        if text in {"", "none", "null", "false", "off"}:
+            return None
+        if text in {"classifier", "head"}:
+            return "classifier"
+        if text in {"preclassifier", "feature_extractor", "features", "hidden_layers", "encoder"}:
+            return "preclassifier"
+    raise ValueError(
+        "training.freeze_part must be one of: classifier, preclassifier (or feature_extractor)."
+    )
+
+
+def _parse_freeze_after_steps(raw: Any) -> int | None:
+    if raw is None:
+        return None
+    if isinstance(raw, str) and raw.strip().lower() in {"", "none", "null"}:
+        return None
+    steps = int(raw)
+    if steps < 0:
+        raise ValueError("training.freeze_after_steps must be >= 0")
+    return steps
+
+
+def _build_grad_mask(params: ParamTree, frozen_part: str | None) -> ParamTree:
+    mask = jax.tree_util.tree_map(lambda x: jnp.ones_like(x), params)
+    if frozen_part == "classifier":
+        mask["classifier"] = jax.tree_util.tree_map(
+            lambda x: jnp.zeros_like(x),
+            params["classifier"],
+        )
+    elif frozen_part == "preclassifier":
+        mask["hidden_layers"] = jax.tree_util.tree_map(
+            lambda x: jnp.zeros_like(x),
+            params["hidden_layers"],
+        )
+    return mask
+
+
+def _apply_grad_mask(grads: ParamTree, mask: ParamTree) -> ParamTree:
+    return jax.tree_util.tree_map(lambda g, m: g * m, grads, mask)
+
+
 def _parse_bump_order(raw: Any) -> list[int] | None:
     if raw is None:
         return None
@@ -380,6 +426,7 @@ def train_epoch(
     steps_this_epoch: int,
     total_steps: int,
     bumps_enabled: bool,
+    bumps_after_freeze: bool,
     period_length: int,
     w_max: float,
     bump_order: list[int] | None,
@@ -387,6 +434,12 @@ def train_epoch(
     cumulative_weight_distance: float,
     prev_params: ParamTree,
     rng: np.random.Generator,
+    freeze_part: str | None,
+    freeze_after_steps: int | None,
+    freeze_applied: bool,
+    grad_mask: ParamTree,
+    reinit_key: jax.Array,
+    initial_params: ParamTree,
 ) -> tuple[
     ParamTree,
     optax.OptState,
@@ -397,6 +450,11 @@ def train_epoch(
     float,
     ParamTree,
     jax.Array | None,
+    ParamTree,
+    bool,
+    ParamTree,
+    jax.Array,
+    int | None,
 ]:
     stats = _init_stats(num_classes)
 
@@ -406,6 +464,7 @@ def train_epoch(
         step_opt_state: optax.OptState,
         batch_x: jax.Array,
         batch_y: jax.Array,
+        mask: ParamTree,
     ) -> tuple[ParamTree, optax.OptState, jax.Array, jax.Array, jax.Array]:
         def _loss_fn(loss_params: ParamTree) -> tuple[jax.Array, tuple[jax.Array, jax.Array, jax.Array]]:
             logits, intermediates = model.apply(loss_params, batch_x, return_intermediates=True)
@@ -419,7 +478,8 @@ def train_epoch(
         (_loss, (logits, per_sample_loss, pre_classifier)), grads = jax.value_and_grad(_loss_fn, has_aux=True)(
             step_params
         )
-        updates, next_opt_state = optimizer.update(grads, step_opt_state, step_params)
+        masked_grads = _apply_grad_mask(grads, mask)
+        updates, next_opt_state = optimizer.update(masked_grads, step_opt_state, step_params)
         next_params = optax.apply_updates(step_params, updates)
         preds = jnp.argmax(logits, axis=1)
         classifier_grads = _classifier_weight_grads(pre_classifier, logits, batch_y, num_classes)
@@ -433,10 +493,42 @@ def train_epoch(
     }
     sampled_distributions: list[np.ndarray] = []
     last_classifier_grads: jax.Array | None = None
+    freeze_step: int | None = None
 
     for _ in range(steps_this_epoch):
+        if (
+            (not freeze_applied)
+            and freeze_after_steps is not None
+            and freeze_part is not None
+            and global_step >= freeze_after_steps
+        ):
+            reinit_key, subkey = jax.random.split(reinit_key)
+            new_params = model.init(subkey)
+            updated_params: ParamTree = dict(params)
+            classifier_reset = False
+            if freeze_part == "classifier":
+                updated_params["hidden_layers"] = new_params["hidden_layers"]
+            elif freeze_part == "preclassifier":
+                updated_params["classifier"] = new_params["classifier"]
+                classifier_reset = True
+
+            params = jax.device_put(updated_params, device=device)
+            opt_state = optimizer.init(params)
+            grad_mask = _build_grad_mask(params, freeze_part)
+            prev_params = params
+            freeze_applied = True
+            freeze_step = int(global_step)
+            if classifier_reset:
+                cumulative_weight_distance = 0.0
+                initial_params = params
+
+        if freeze_applied:
+            allow_bumps = bumps_after_freeze
+        else:
+            allow_bumps = bumps_enabled
+
         in_uniform_tail = global_step >= (0.95 * float(total_steps))
-        if bumps_enabled and (not in_uniform_tail):
+        if allow_bumps and (not in_uniform_tail):
             class_probs, focus_class, focus_weight, bump_phase = _compute_class_probabilities(
                 step=global_step,
                 num_classes=num_classes,
@@ -474,7 +566,13 @@ def train_epoch(
         y = jax.device_put(jnp.asarray(batch_target, dtype=jnp.int32), device=device)
 
         prev_w = model.classifier_weight_matrix(prev_params)
-        params, opt_state, per_sample_loss, preds, classifier_grads = _train_step(params, opt_state, x, y)
+        params, opt_state, per_sample_loss, preds, classifier_grads = _train_step(
+            params,
+            opt_state,
+            x,
+            y,
+            grad_mask,
+        )
         current_w = model.classifier_weight_matrix(params)
         dist = float(jnp.linalg.norm(current_w - prev_w))
         cumulative_weight_distance += dist
@@ -499,6 +597,11 @@ def train_epoch(
         cumulative_weight_distance,
         prev_params,
         last_classifier_grads,
+        initial_params,
+        freeze_applied,
+        grad_mask,
+        reinit_key,
+        freeze_step,
     )
 
 
@@ -614,8 +717,19 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
     gradient_clipping_raw = optimizer_cfg.get("gradient_clipping", training_cfg.get("gradient_clipping"))
     gradient_clipping = None if gradient_clipping_raw in (None, "", "null") else float(gradient_clipping_raw)
 
+    freeze_part = _normalize_freeze_part(training_cfg.get("freeze_part"))
+    freeze_after_steps = _parse_freeze_after_steps(training_cfg.get("freeze_after_steps"))
+    if freeze_part is None and freeze_after_steps is not None:
+        raise ValueError("training.freeze_part must be set when training.freeze_after_steps is provided")
+    if freeze_part is not None and freeze_after_steps is None:
+        raise ValueError("training.freeze_after_steps must be set when training.freeze_part is provided")
+    if freeze_after_steps is not None and freeze_after_steps >= total_steps:
+        freeze_part = None
+        freeze_after_steps = None
+
     bumps_before_tpt = _as_bool(dynamics_cfg.get("bumps_before_TPT", False))
     bumps_at_tpt = _as_bool(dynamics_cfg.get("bumps_at_TPT", False))
+    bumps_after_freeze = _as_bool(dynamics_cfg.get("bumps_after_freeze", True))
     period_length = int(dynamics_cfg.get("period_length", 250))
     w_max = float(dynamics_cfg.get("w_max", 50.0))
 
@@ -644,6 +758,10 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
     initial_params = params
     cumulative_weight_distance = 0.0
     prev_params = params
+    grad_mask = _build_grad_mask(params, None)
+    freeze_applied = False
+    freeze_step_applied: int | None = None
+    reinit_key = jax.random.PRNGKey(int(random_seed) + 1)
 
     if optimizer_name == "adam":
         base_optimizer = optax.adam(
@@ -747,6 +865,11 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
                 cumulative_weight_distance,
                 prev_params,
                 last_classifier_grads,
+                initial_params,
+                freeze_applied,
+                grad_mask,
+                reinit_key,
+                freeze_step,
             ) = train_epoch(
                 params=params,
                 opt_state=opt_state,
@@ -762,6 +885,7 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
                 steps_this_epoch=steps_this_epoch,
                 total_steps=total_steps,
                 bumps_enabled=bumps_enabled,
+                bumps_after_freeze=bumps_after_freeze,
                 period_length=period_length,
                 w_max=w_max,
                 bump_order=bump_order,
@@ -769,7 +893,18 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
                 cumulative_weight_distance=cumulative_weight_distance,
                 prev_params=prev_params,
                 rng=rng,
+                freeze_part=freeze_part,
+                freeze_after_steps=freeze_after_steps,
+                freeze_applied=freeze_applied,
+                grad_mask=grad_mask,
+                reinit_key=reinit_key,
+                initial_params=initial_params,
             )
+            if freeze_step is not None and freeze_step_applied is None:
+                freeze_step_applied = int(freeze_step)
+                print(
+                    f"[{run_label}] freeze applied at step {freeze_step_applied} (frozen {freeze_part})"
+                )
             if step_distributions.size > 0:
                 class_distribution_history.extend(step_distributions)
 
@@ -976,6 +1111,11 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
         "total_steps": total_steps,
         "save_metrics_every_n_steps": save_metrics_every_n_steps,
         "epochs": total_epochs,
+        "freeze_part": freeze_part,
+        "freeze_after_steps": freeze_after_steps,
+        "freeze_applied": bool(freeze_step_applied is not None),
+        "freeze_step": int(freeze_step_applied) if freeze_step_applied is not None else None,
+        "bumps_after_freeze": bool(bumps_after_freeze),
         "tpt_reached": bool(tpt_reached),
         "tpt_step": int(tpt_step),
         "csv_path": str(csv_path),
