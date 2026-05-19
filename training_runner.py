@@ -48,6 +48,12 @@ from PCA_analysis import (
     initialize_pca_csv,
     normalize_projected_dims,
 )
+from PCA_geometric_overlapping import (
+    append_geo_csv_row,
+    collect_geo_epoch,
+    finalize_geo_plots,
+    initialize_geo_csv,
+)
 from model import JAXModel, ParamTree, build_model
 
 
@@ -67,6 +73,22 @@ def _as_bool(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return bool(value)
+
+
+def _analysis_output_enabled(
+    analysis_cfg: Dict[str, Any],
+    keys: tuple[str, ...],
+    default: bool = True,
+) -> bool:
+    outputs_cfg = analysis_cfg.get("outputs", analysis_cfg.get("metrics", {}))
+    if isinstance(outputs_cfg, dict):
+        for key in keys:
+            if key in outputs_cfg:
+                return _as_bool(outputs_cfg[key])
+    for key in keys:
+        if key in analysis_cfg:
+            return _as_bool(analysis_cfg[key])
+    return default
 
 
 def _normalize_freeze_part(raw: Any) -> str | None:
@@ -784,43 +806,81 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
     opt_state = optimizer.init(params)
 
     csv_path = run_dir / "training_metrics.csv"
-    nc_csv_path = run_dir / "nc_metrics.csv"
     figure_path = run_dir / "training_report.png"
-    neural_collapse_figure_path = run_dir / "neural_collapse.png"
-
-    nc_class_pairs = build_nc_class_pairs(num_classes)
-    initialize_nc_csv(
-        nc_csv_path=nc_csv_path,
-        num_classes=num_classes,
-        class_pairs=nc_class_pairs,
-    )
-    sep_csv_path = run_dir / "separability_metrics.csv"
-    separability_figure_path = run_dir / "separability_measures.png"
-    initialize_sep_csv(
-        sep_csv_path=sep_csv_path,
-        num_classes=num_classes,
-        class_pairs=nc_class_pairs,
-    )
-
-    classifier_csv_path = run_dir / "classifier_metrics.csv"
-    classifier_figure_path = run_dir / "classifier_metrics.png"
-    initialize_classifier_csv(
-        csv_path=classifier_csv_path,
-        num_classes=num_classes,
-    )
 
     analysis_cfg = config.get("analysis", {})
-    pca_cfg = analysis_cfg.get("pca", {})
-    feature_dim = int(model.classifier_weight_matrix(params).shape[1])
-    projected_dims = normalize_projected_dims(pca_cfg.get("projected_dims", [1, 2, 3, 5]), feature_dim)
-    pca_csv_path = run_dir / "pca_analysis.csv"
-    pca_variance_path = run_dir / "pca_explained_variance.png"
-    pca_projected_path = run_dir / "pca_projected_metrics.png"
-    initialize_pca_csv(
-        csv_path=pca_csv_path,
-        feature_dim=feature_dim,
-        projected_dims=projected_dims,
+    enable_classifier_metrics = _analysis_output_enabled(analysis_cfg, ("classifier_metrics",))
+    enable_nc_metrics = _analysis_output_enabled(analysis_cfg, ("nc_metrics",))
+    enable_sep_metrics = _analysis_output_enabled(analysis_cfg, ("separability_metrics",))
+    enable_pca_analysis = _analysis_output_enabled(analysis_cfg, ("pca_analysis",))
+    enable_geo_metrics = _analysis_output_enabled(
+        analysis_cfg,
+        ("PCA_geometric", "pca_geometric", "pca_geometric_overlapping"),
     )
+    collect_pre_classifier = enable_classifier_metrics or enable_pca_analysis or enable_geo_metrics
+
+    nc_class_pairs = build_nc_class_pairs(num_classes)
+
+    nc_csv_path: Path | None = None
+    neural_collapse_figure_path: Path | None = None
+    if enable_nc_metrics:
+        nc_csv_path = run_dir / "nc_metrics.csv"
+        neural_collapse_figure_path = run_dir / "neural_collapse.png"
+        initialize_nc_csv(
+            nc_csv_path=nc_csv_path,
+            num_classes=num_classes,
+            class_pairs=nc_class_pairs,
+        )
+
+    sep_csv_path: Path | None = None
+    separability_figure_path: Path | None = None
+    if enable_sep_metrics:
+        sep_csv_path = run_dir / "separability_metrics.csv"
+        separability_figure_path = run_dir / "separability_measures.png"
+        initialize_sep_csv(
+            sep_csv_path=sep_csv_path,
+            num_classes=num_classes,
+            class_pairs=nc_class_pairs,
+        )
+
+    classifier_csv_path: Path | None = None
+    classifier_figure_path: Path | None = None
+    if enable_classifier_metrics:
+        classifier_csv_path = run_dir / "classifier_metrics.csv"
+        classifier_figure_path = run_dir / "classifier_metrics.png"
+        initialize_classifier_csv(
+            csv_path=classifier_csv_path,
+            num_classes=num_classes,
+        )
+
+    pca_csv_path: Path | None = None
+    pca_variance_path: Path | None = None
+    pca_projected_path: Path | None = None
+    feature_dim: int | None = None
+    projected_dims: list[int] | None = None
+    if enable_pca_analysis:
+        pca_cfg = analysis_cfg.get("pca", {})
+        feature_dim = int(model.classifier_weight_matrix(params).shape[1])
+        projected_dims = normalize_projected_dims(pca_cfg.get("projected_dims", [1, 2, 3, 5]), feature_dim)
+        pca_csv_path = run_dir / "pca_analysis.csv"
+        pca_variance_path = run_dir / "pca_explained_variance.png"
+        pca_projected_path = run_dir / "pca_projected_metrics.png"
+        initialize_pca_csv(
+            csv_path=pca_csv_path,
+            feature_dim=feature_dim,
+            projected_dims=projected_dims,
+        )
+
+    geo_csv_path: Path | None = None
+    geo_figure_path: Path | None = None
+    if enable_geo_metrics:
+        geo_csv_path = run_dir / "PCA_geometric.csv"
+        geo_figure_path = run_dir / "PCA_geometric_overlapping.png"
+        initialize_geo_csv(
+            csv_path=geo_csv_path,
+            num_classes=num_classes,
+            class_pairs=nc_class_pairs,
+        )
 
     predict_step = jax.jit(lambda step_params, batch_x: model.apply(step_params, batch_x))
 
@@ -927,88 +987,120 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
                 num_classes=num_classes,
             )
 
-            nc_raw = collect_nc_raw_epoch(
-                model=model,
-                params=params,
-                inputs=dataset_bundle.train_inputs,
-                targets=dataset_bundle.train_targets,
-                num_classes=num_classes,
-                class_pairs=nc_class_pairs,
-                eval_batch_size=eval_batch_size,
-            )
-            append_nc_csv_row(
-                nc_csv_path=nc_csv_path,
-                epoch=epoch,
-                global_step=global_step,
-                raw=nc_raw,
-                num_classes=num_classes,
-            )
+            if enable_nc_metrics:
+                nc_raw = collect_nc_raw_epoch(
+                    model=model,
+                    params=params,
+                    inputs=dataset_bundle.train_inputs,
+                    targets=dataset_bundle.train_targets,
+                    num_classes=num_classes,
+                    class_pairs=nc_class_pairs,
+                    eval_batch_size=eval_batch_size,
+                )
+                append_nc_csv_row(
+                    nc_csv_path=nc_csv_path,
+                    epoch=epoch,
+                    global_step=global_step,
+                    raw=nc_raw,
+                    num_classes=num_classes,
+                )
 
-            sep_raw: SepEpochRaw = collect_sep_raw_epoch(
-                model=model,
-                params=params,
-                inputs=dataset_bundle.train_inputs,
-                targets=dataset_bundle.train_targets,
-                num_classes=num_classes,
-                class_pairs=nc_class_pairs,
-                eval_batch_size=eval_batch_size,
-            )
-            append_sep_csv_row(
-                sep_csv_path=sep_csv_path,
-                epoch=epoch,
-                global_step=global_step,
-                raw=sep_raw,
-                num_classes=num_classes,
-            )
+            if enable_sep_metrics:
+                sep_raw: SepEpochRaw = collect_sep_raw_epoch(
+                    model=model,
+                    params=params,
+                    inputs=dataset_bundle.train_inputs,
+                    targets=dataset_bundle.train_targets,
+                    num_classes=num_classes,
+                    class_pairs=nc_class_pairs,
+                    eval_batch_size=eval_batch_size,
+                )
+                append_sep_csv_row(
+                    sep_csv_path=sep_csv_path,
+                    epoch=epoch,
+                    global_step=global_step,
+                    raw=sep_raw,
+                    num_classes=num_classes,
+                )
 
-            pre_classifier, logits, labels = _collect_pre_classifier_outputs(
-                model=model,
-                params=params,
-                inputs=dataset_bundle.train_inputs,
-                targets=dataset_bundle.train_targets,
-                batch_size=eval_batch_size,
-                device=device,
-            )
-            weight_matrix = np.asarray(model.classifier_weight_matrix(params), dtype=np.float64)
-            classifier_raw = collect_classifier_epoch(
-                pre_classifier=pre_classifier,
-                logits=logits,
-                targets=labels,
-                weight_matrix=weight_matrix,
-            )
-            advanced_classifier_raw = collect_advanced_classifier_metrics(
-                params=params,
-                initial_params=initial_params,
-                cumulative_weight_distance=cumulative_weight_distance,
-                logits=logits,
-                targets=labels,
-                grads=last_classifier_grads,
-            )
-            append_classifier_csv_row(
-                csv_path=classifier_csv_path,
-                epoch=epoch,
-                global_step=global_step,
-                raw=classifier_raw,
-                num_classes=num_classes,
-                advanced_raw=advanced_classifier_raw,
-            )
+            pre_classifier: np.ndarray | None = None
+            logits: np.ndarray | None = None
+            labels: np.ndarray | None = None
+            if collect_pre_classifier:
+                pre_classifier, logits, labels = _collect_pre_classifier_outputs(
+                    model=model,
+                    params=params,
+                    inputs=dataset_bundle.train_inputs,
+                    targets=dataset_bundle.train_targets,
+                    batch_size=eval_batch_size,
+                    device=device,
+                )
 
-            pca_raw = collect_pca_epoch(
-                pre_classifier=pre_classifier,
-                targets=labels,
-                num_classes=num_classes,
-                class_pairs=nc_class_pairs,
-                eval_batch_size=eval_batch_size,
-                projected_dims=projected_dims,
-            )
-            append_pca_csv_row(
-                csv_path=pca_csv_path,
-                epoch=epoch,
-                global_step=global_step,
-                raw=pca_raw,
-                feature_dim=feature_dim,
-                projected_dims=projected_dims,
-            )
+            if enable_classifier_metrics:
+                if pre_classifier is None or logits is None or labels is None:
+                    raise RuntimeError("Classifier metrics enabled but no pre-classifier outputs were collected.")
+                weight_matrix = np.asarray(model.classifier_weight_matrix(params), dtype=np.float64)
+                classifier_raw = collect_classifier_epoch(
+                    pre_classifier=pre_classifier,
+                    logits=logits,
+                    targets=labels,
+                    weight_matrix=weight_matrix,
+                )
+                advanced_classifier_raw = collect_advanced_classifier_metrics(
+                    params=params,
+                    initial_params=initial_params,
+                    cumulative_weight_distance=cumulative_weight_distance,
+                    logits=logits,
+                    targets=labels,
+                    grads=last_classifier_grads,
+                )
+                append_classifier_csv_row(
+                    csv_path=classifier_csv_path,
+                    epoch=epoch,
+                    global_step=global_step,
+                    raw=classifier_raw,
+                    num_classes=num_classes,
+                    advanced_raw=advanced_classifier_raw,
+                )
+
+            if enable_pca_analysis:
+                if pre_classifier is None or labels is None:
+                    raise RuntimeError("PCA analysis enabled but no pre-classifier outputs were collected.")
+                if feature_dim is None or projected_dims is None:
+                    raise RuntimeError("PCA analysis enabled but PCA configuration is missing.")
+                pca_raw = collect_pca_epoch(
+                    pre_classifier=pre_classifier,
+                    targets=labels,
+                    num_classes=num_classes,
+                    class_pairs=nc_class_pairs,
+                    eval_batch_size=eval_batch_size,
+                    projected_dims=projected_dims,
+                )
+                append_pca_csv_row(
+                    csv_path=pca_csv_path,
+                    epoch=epoch,
+                    global_step=global_step,
+                    raw=pca_raw,
+                    feature_dim=feature_dim,
+                    projected_dims=projected_dims,
+                )
+
+            if enable_geo_metrics:
+                if pre_classifier is None or labels is None:
+                    raise RuntimeError("PCA geometric metrics enabled but no pre-classifier outputs were collected.")
+                geo_raw = collect_geo_epoch(
+                    pre_classifier=pre_classifier,
+                    targets=labels,
+                    num_classes=num_classes,
+                    class_pairs=nc_class_pairs,
+                )
+                append_geo_csv_row(
+                    csv_path=geo_csv_path,
+                    epoch=epoch,
+                    global_step=global_step,
+                    raw=geo_raw,
+                    num_classes=num_classes,
+                )
 
             if (not tpt_reached) and bool(train_metrics.get("zero_training_error", False)):
                 tpt_reached = True
@@ -1060,34 +1152,46 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
         tpt_step=tpt_step if tpt_reached else -1,
     )
 
-    finalize_nc_metrics(
-        nc_csv_path=nc_csv_path,
-        output_path=neural_collapse_figure_path,
-        num_classes=num_classes,
-        class_pairs=nc_class_pairs,
-        tpt_step=tpt_step if tpt_reached else -1,
-    )
-    finalize_sep_metrics(
-        sep_csv_path=sep_csv_path,
-        output_path=separability_figure_path,
-        num_classes=num_classes,
-        class_pairs=nc_class_pairs,
-        tpt_step=tpt_step if tpt_reached else -1,
-    )
-    finalize_classifier_dashboard(
-        csv_path=classifier_csv_path,
-        output_path=classifier_figure_path,
-        num_classes=num_classes,
-        tpt_step=tpt_step if tpt_reached else -1,
-    )
-    finalize_pca_analysis(
-        csv_path=pca_csv_path,
-        variance_output_path=pca_variance_path,
-        projected_output_path=pca_projected_path,
-        feature_dim=feature_dim,
-        projected_dims=projected_dims,
-        tpt_step=tpt_step if tpt_reached else -1,
-    )
+    if enable_nc_metrics:
+        finalize_nc_metrics(
+            nc_csv_path=nc_csv_path,
+            output_path=neural_collapse_figure_path,
+            num_classes=num_classes,
+            class_pairs=nc_class_pairs,
+            tpt_step=tpt_step if tpt_reached else -1,
+        )
+    if enable_sep_metrics:
+        finalize_sep_metrics(
+            sep_csv_path=sep_csv_path,
+            output_path=separability_figure_path,
+            num_classes=num_classes,
+            class_pairs=nc_class_pairs,
+            tpt_step=tpt_step if tpt_reached else -1,
+        )
+    if enable_classifier_metrics:
+        finalize_classifier_dashboard(
+            csv_path=classifier_csv_path,
+            output_path=classifier_figure_path,
+            num_classes=num_classes,
+            tpt_step=tpt_step if tpt_reached else -1,
+        )
+    if enable_pca_analysis:
+        finalize_pca_analysis(
+            csv_path=pca_csv_path,
+            variance_output_path=pca_variance_path,
+            projected_output_path=pca_projected_path,
+            feature_dim=feature_dim,
+            projected_dims=projected_dims,
+            tpt_step=tpt_step if tpt_reached else -1,
+        )
+    if enable_geo_metrics:
+        finalize_geo_plots(
+            csv_path=geo_csv_path,
+            output_path=geo_figure_path,
+            num_classes=num_classes,
+            class_pairs=nc_class_pairs,
+            tpt_step=tpt_step if tpt_reached else -1,
+        )
 
     boundary_figure_path: Path | None = None
     if dataset_name.strip().lower() == "spiral":
@@ -1119,15 +1223,23 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
         "tpt_reached": bool(tpt_reached),
         "tpt_step": int(tpt_step),
         "csv_path": str(csv_path),
-        "nc_csv_path": str(nc_csv_path),
+        "nc_csv_path": str(nc_csv_path) if nc_csv_path is not None else None,
         "figure_path": str(figure_path),
-        "neural_collapse_figure_path": str(neural_collapse_figure_path),
-        "separability_figure_path": str(separability_figure_path),
-        "classifier_csv_path": str(classifier_csv_path),
-        "classifier_figure_path": str(classifier_figure_path),
-        "pca_csv_path": str(pca_csv_path),
-        "pca_variance_path": str(pca_variance_path),
-        "pca_projected_path": str(pca_projected_path),
+        "neural_collapse_figure_path": str(neural_collapse_figure_path)
+        if neural_collapse_figure_path is not None
+        else None,
+        "separability_figure_path": str(separability_figure_path)
+        if separability_figure_path is not None
+        else None,
+        "classifier_csv_path": str(classifier_csv_path) if classifier_csv_path is not None else None,
+        "classifier_figure_path": str(classifier_figure_path)
+        if classifier_figure_path is not None
+        else None,
+        "pca_csv_path": str(pca_csv_path) if pca_csv_path is not None else None,
+        "pca_variance_path": str(pca_variance_path) if pca_variance_path is not None else None,
+        "pca_projected_path": str(pca_projected_path) if pca_projected_path is not None else None,
+        "geo_csv_path": str(geo_csv_path) if geo_csv_path is not None else None,
+        "geo_figure_path": str(geo_figure_path) if geo_figure_path is not None else None,
         "distribution_figure_path": str(distribution_figure_path),
         "decision_boundary_path": str(boundary_figure_path) if boundary_figure_path is not None else None,
         "final_train_loss": float(last_train_metrics["loss"]),
