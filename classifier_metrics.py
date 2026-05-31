@@ -351,6 +351,109 @@ def finalize_classifier_metrics(
     plt.close(fig)
 
 
+def finalize_classifier_simplified(
+    csv_path: Path,
+    output_path: Path,
+    num_classes: int,
+    tpt_step: int = -1,
+) -> None:
+    rows = _load_classifier_columns(csv_path)
+    if not rows:
+        raise ValueError(f"No classifier rows found in {csv_path}")
+
+    steps = np.asarray([int(row["global_step"]) for row in rows], dtype=np.int64)
+    correct_logits = np.asarray(
+        [
+            [row.get(f"logit_correct_mean_class_{class_id}", float("nan")) for class_id in range(num_classes)]
+            for row in rows
+        ],
+        dtype=np.float64,
+    )
+    max_wrong_logits = np.asarray(
+        [
+            [row.get(f"logit_max_wrong_mean_class_{class_id}", float("nan")) for class_id in range(num_classes)]
+            for row in rows
+        ],
+        dtype=np.float64,
+    )
+    path_curvature_ratio = np.asarray(
+        [row.get("path_curvature_ratio", float("nan")) for row in rows],
+        dtype=np.float64,
+    )
+    weight_norms = np.asarray(
+        [
+            [row.get(f"weight_norm_class_{class_id}", float("nan")) for class_id in range(num_classes)]
+            for row in rows
+        ],
+        dtype=np.float64,
+    )
+    condition_number = np.asarray(
+        [row.get("condition_number", float("nan")) for row in rows],
+        dtype=np.float64,
+    )
+
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12), sharex=True)
+
+    ax = axes[0, 0]
+    for class_id in range(num_classes):
+        color = None
+        if num_classes <= 10:
+            color = plt.get_cmap("tab10")(class_id % 10)
+        ax.plot(steps, correct_logits[:, class_id], linewidth=1.6, color=color, label=f"class {class_id} correct")
+        ax.plot(
+            steps,
+            max_wrong_logits[:, class_id],
+            linewidth=1.2,
+            linestyle="--",
+            alpha=0.8,
+            color=color,
+            label=f"class {class_id} max wrong",
+        )
+    ax.set_title("Logit Decomposition")
+    ax.set_ylabel("Logit")
+    ax.set_ylim(-5.0, 25.0)
+    ax.grid(True, alpha=0.3)
+    if num_classes <= 6:
+        ax.legend(fontsize=7, ncol=2)
+
+    ax = axes[0, 1]
+    ax.plot(steps, path_curvature_ratio, linewidth=1.8)
+    ax.set_title("Path Curvature Ratio")
+    ax.set_ylabel("cumulative / ||W - W0||")
+    ax.set_ylim(0.0, 25.0)
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[1, 0]
+    for class_id in range(num_classes):
+        ax.plot(steps, weight_norms[:, class_id], linewidth=1.6, label=f"class {class_id}")
+    ax.set_title("Classifier Weight Norms")
+    ax.set_xlabel("Global Step")
+    ax.set_ylabel("L2 norm")
+    ax.set_ylim(0.0, 300.0)
+    ax.grid(True, alpha=0.3)
+    if num_classes <= 12:
+        ax.legend(fontsize=7, ncol=2)
+
+    ax = axes[1, 1]
+    ax.plot(steps, condition_number, linewidth=1.8, label="condition number")
+    ax.set_title("Classifier Condition Number")
+    ax.set_xlabel("Global Step")
+    ax.set_ylabel("kappa(W)")
+    ax.set_ylim(0.0, 15.0)
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8)
+
+    if tpt_step >= 0:
+        for axis in axes.flat:
+            axis.axvline(tpt_step, color="black", linestyle="-", linewidth=2.0)
+
+    fig.suptitle("Classifier Metrics", fontsize=16)
+    plt.tight_layout(rect=[0.0, 0.0, 1.0, 0.95])
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+
+
 def finalize_classifier_dashboard(
     csv_path: Path,
     output_path: Path,

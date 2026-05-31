@@ -43,12 +43,12 @@ def _extract_2d_points(inputs: np.ndarray, targets: np.ndarray) -> tuple[np.ndar
         return x[:, :, 0, 0], y
 
     raise ValueError(
-        "Spiral decision boundary plot expects 2D inputs with shape (N,2) "
+        "Decision boundary plot expects 2D inputs with shape (N,2) "
         "or (N,2,1,1)."
     )
 
 
-def plot_spiral_decision_boundaries(
+def plot_2d_decision_boundaries(
     model: JAXModel,
     params: ParamTree,
     train_inputs: np.ndarray,
@@ -144,6 +144,30 @@ def plot_spiral_decision_boundaries(
     plt.tight_layout()
     plt.savefig(output_path, dpi=180, bbox_inches="tight")
     plt.close(fig)
+
+
+def plot_spiral_decision_boundaries(
+    model: JAXModel,
+    params: ParamTree,
+    train_inputs: np.ndarray,
+    train_targets: np.ndarray,
+    test_inputs: np.ndarray,
+    test_targets: np.ndarray,
+    output_path: Path,
+    title: str,
+    grid_size: int = 400,
+) -> None:
+    plot_2d_decision_boundaries(
+        model=model,
+        params=params,
+        train_inputs=train_inputs,
+        train_targets=train_targets,
+        test_inputs=test_inputs,
+        test_targets=test_targets,
+        output_path=output_path,
+        title=title,
+        grid_size=grid_size,
+    )
 
 
 def plot_training_report(

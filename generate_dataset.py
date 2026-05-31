@@ -73,6 +73,89 @@ def _validate_spiral_data_config(data_cfg: dict) -> None:
         )
 
 
+def _validate_gaussian_blobs_config(data_cfg: dict) -> None:
+    num_classes = int(data_cfg.get("num_classes", 3))
+    points_per_class = int(data_cfg.get("points_per_class", 1000))
+    noise_std = float(data_cfg.get("noise_std", 0.1))
+    center_radius = float(data_cfg.get("center_radius", 2.0))
+
+    if num_classes < 2:
+        raise ValueError("For gaussian_blobs data, data.num_classes must be >= 2.")
+    if points_per_class <= 0:
+        raise ValueError("For gaussian_blobs data, data.points_per_class must be > 0.")
+    if noise_std < 0:
+        raise ValueError("For gaussian_blobs data, data.noise_std must be >= 0.")
+    if center_radius <= 0:
+        raise ValueError("For gaussian_blobs data, data.center_radius must be > 0.")
+
+
+def _validate_rings_config(data_cfg: dict) -> None:
+    num_classes = int(data_cfg.get("num_classes", 3))
+    points_per_class = int(data_cfg.get("points_per_class", 1000))
+    noise_std = float(data_cfg.get("noise_std", 0.1))
+    center_radius = float(data_cfg.get("center_radius", 1.0))
+    class_separation = float(data_cfg.get("class_separation", 0.5))
+
+    if num_classes < 2:
+        raise ValueError("For rings data, data.num_classes must be >= 2.")
+    if points_per_class <= 0:
+        raise ValueError("For rings data, data.points_per_class must be > 0.")
+    if noise_std < 0:
+        raise ValueError("For rings data, data.noise_std must be >= 0.")
+    if center_radius <= 0:
+        raise ValueError("For rings data, data.center_radius must be > 0.")
+    if class_separation <= 0:
+        raise ValueError("For rings data, data.class_separation must be > 0.")
+    if noise_std >= class_separation / 2.0:
+        raise ValueError(
+            "For rings data, noise_std must be < class_separation / 2 to avoid ring overlap."
+        )
+
+
+def _validate_bimodal_config(data_cfg: dict) -> None:
+    num_classes = int(data_cfg.get("num_classes", 3))
+    points_per_class = int(data_cfg.get("points_per_class", 1000))
+    noise_std = float(data_cfg.get("noise_std", 0.15))
+    center_radius = float(data_cfg.get("center_radius", 2.5))
+    class_separation = float(data_cfg.get("class_separation", 120.0))
+
+    if num_classes < 2:
+        raise ValueError("For bimodal data, data.num_classes must be >= 2.")
+    if points_per_class <= 0:
+        raise ValueError("For bimodal data, data.points_per_class must be > 0.")
+    if noise_std < 0:
+        raise ValueError("For bimodal data, data.noise_std must be >= 0.")
+    if center_radius <= 0:
+        raise ValueError("For bimodal data, data.center_radius must be > 0.")
+    if not (0.0 < class_separation <= 360.0):
+        raise ValueError("For bimodal data, data.class_separation must be in (0, 360] degrees.")
+
+
+def _validate_checkerboard_config(data_cfg: dict) -> None:
+    grid_size = int(data_cfg.get("grid_size", 4))
+    num_classes = int(data_cfg.get("num_classes", 2))
+    noise_std = float(data_cfg.get("noise_std", 0.2))
+    points_per_class = int(data_cfg.get("points_per_class", 1000))
+
+    if num_classes < 2:
+        raise ValueError("For checkerboard, num_classes must be >= 2.")
+    if grid_size < 2:
+        raise ValueError("For checkerboard, grid_size must be >= 2.")
+    if grid_size < num_classes:
+        raise ValueError("For checkerboard, grid_size must be >= num_classes.")
+    if points_per_class <= 0:
+        raise ValueError("For checkerboard, points_per_class must be > 0.")
+    if noise_std <= 0:
+        raise ValueError("For checkerboard, noise_std must be > 0.")
+    cell_width = 2.0 / grid_size
+    if noise_std > cell_width / 2.0:
+        raise ValueError(
+            f"noise_std={noise_std} > cell_width/2={cell_width/2:.3f}: "
+            "point squares would overlap between adjacent cells. "
+            "Reduce noise_std or increase grid_size."
+        )
+
+
 def build_class_index_map(labels: np.ndarray, num_classes: int) -> Dict[int, np.ndarray]:
     class_to_indices: Dict[int, np.ndarray] = {}
     labels_np = np.asarray(labels, dtype=np.int64)
@@ -122,6 +205,198 @@ def generate_spiral_data(
     return x_all, y_all
 
 
+def generate_gaussian_blobs(
+    points_per_class: int,
+    num_classes: int,
+    noise_std: float,
+    random_seed: int,
+    center_radius: float = 2.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    rng = np.random.default_rng(random_seed)
+    angles = np.linspace(0.0, 2.0 * np.pi, num_classes, endpoint=False, dtype=np.float64)
+    centers = np.stack([np.cos(angles), np.sin(angles)], axis=1) * float(center_radius)
+
+    x_parts: list[np.ndarray] = []
+    y_parts: list[np.ndarray] = []
+    for class_id in range(num_classes):
+        pts = rng.normal(centers[class_id], noise_std, size=(points_per_class, 2)).astype(np.float32)
+        x_parts.append(pts)
+        y_parts.append(np.full(points_per_class, class_id, dtype=np.int64))
+
+    return np.vstack(x_parts), np.concatenate(y_parts)
+
+
+def generate_rings(
+    points_per_class: int,
+    num_classes: int,
+    noise_std: float,
+    random_seed: int,
+    center_radius: float = 0.3,
+    class_separation: float = 0.15,
+    num_rings: int = 3,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Each class has num_rings concentric rings, interleaved with other classes.
+    Ring k of class c has radius: center_radius + (c + k*num_classes) * class_separation
+    noise_std is the radial half-width of each ring (keep small relative to class_separation).
+    All rings share center (0, 0).
+    """
+    rng = np.random.default_rng(random_seed)
+
+    x_parts: list[np.ndarray] = []
+    y_parts: list[np.ndarray] = []
+
+    pts_per_ring = points_per_class // num_rings
+    remainder = points_per_class - pts_per_ring * num_rings
+
+    for class_id in range(num_classes):
+        all_pts: list[np.ndarray] = []
+        for ring_idx in range(num_rings):
+            n = pts_per_ring + (1 if ring_idx < remainder else 0)
+            ring_radius = float(center_radius) + (class_id + ring_idx * num_classes) * float(class_separation)
+            t = rng.uniform(0.0, 2.0 * np.pi, size=n).astype(np.float32)
+            r = ring_radius + rng.uniform(-float(noise_std), float(noise_std), size=n).astype(np.float32)
+            pts = np.stack([r * np.cos(t), r * np.sin(t)], axis=1)
+            all_pts.append(pts.astype(np.float32))
+        x_parts.append(np.vstack(all_pts))
+        y_parts.append(np.full(points_per_class, class_id, dtype=np.int64))
+
+    return np.vstack(x_parts), np.concatenate(y_parts)
+
+
+def generate_bimodal_classes(
+    points_per_class: int,
+    num_classes: int,
+    class_separation: float,
+    noise_std: float,
+    random_seed: int,
+    center_radius: float = 0.7,
+    num_modes: int = 3,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Each class has num_modes blob pairs (2*num_modes blobs total).
+    Blobs are placed at angles k * (360 / (num_classes * num_modes)) + class_id * class_separation,
+    alternating classes around the circle, at distance center_radius from origin.
+    class_separation is the angular offset between classes in degrees.
+    """
+    rng = np.random.default_rng(random_seed)
+
+    total_blobs_per_class = 2 * num_modes
+    pts_per_blob = points_per_class // total_blobs_per_class
+    remainder = points_per_class - pts_per_blob * total_blobs_per_class
+
+    angular_step = 360.0 / (num_classes * num_modes)
+
+    x_parts: list[np.ndarray] = []
+    y_parts: list[np.ndarray] = []
+
+    for class_id in range(num_classes):
+        all_pts: list[np.ndarray] = []
+        blob_count = 0
+        for mode_idx in range(num_modes):
+            # two antipodal blobs per mode, rotated to interleave with other classes
+            base_angle = (class_id + mode_idx * num_classes) * angular_step
+            for sign in (1.0, -1.0):
+                angle = np.deg2rad(base_angle + (0.0 if sign > 0 else 180.0))
+                center = np.array([np.cos(angle), np.sin(angle)]) * float(center_radius)
+                n = pts_per_blob + (1 if blob_count < remainder else 0)
+                blob_count += 1
+                pts = rng.normal(center, float(noise_std), size=(n, 2))
+                all_pts.append(pts.astype(np.float32))
+        x_parts.append(np.vstack(all_pts))
+        y_parts.append(np.full(points_per_class, class_id, dtype=np.int64))
+
+    return np.vstack(x_parts), np.concatenate(y_parts)
+
+
+def generate_checkerboard(
+    points_per_class: int,
+    num_classes: int,
+    noise_std: float,
+    random_seed: int,
+    grid_size: int = 4,
+    random_tile_classes: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Places a grid_size x grid_size array of cell centers within [-1, 1]^2.
+    Cell centers are at (-1 + (i+0.5)*cell_width, -1 + (j+0.5)*cell_width).
+    Class assignment: (i + j) % num_classes by default, or random per tile
+    when random_tile_classes is True.
+    Points for each cell are sampled uniformly in a square of half-width
+    noise_std centered on that cell's center.
+    """
+    rng = np.random.default_rng(random_seed)
+    cell_width = 2.0 / float(grid_size)
+
+    if random_tile_classes:
+        tile_classes = rng.integers(0, num_classes, size=(grid_size, grid_size), dtype=np.int64)
+        while len(np.unique(tile_classes)) < num_classes:
+            tile_classes = rng.integers(0, num_classes, size=(grid_size, grid_size), dtype=np.int64)
+    else:
+        tile_classes = np.fromfunction(
+            lambda i, j: (i + j) % num_classes,
+            (grid_size, grid_size),
+            dtype=np.int64,
+        ).astype(np.int64)
+
+    # collect centers per class
+    centers_per_class: list[list[tuple[float, float]]] = [[] for _ in range(num_classes)]
+    for i in range(grid_size):
+        for j in range(grid_size):
+            class_id = int(tile_classes[i, j])
+            cx = -1.0 + (i + 0.5) * cell_width
+            cy = -1.0 + (j + 0.5) * cell_width
+            centers_per_class[class_id].append((float(cx), float(cy)))
+
+    if any(len(centers) == 0 for centers in centers_per_class):
+        raise ValueError(
+            "checkerboard config produced an empty class; reduce num_classes or increase grid_size."
+        )
+
+    x_parts: list[np.ndarray] = []
+    y_parts: list[np.ndarray] = []
+    for class_id in range(num_classes):
+        centers = centers_per_class[class_id]
+        n_centers = len(centers)
+        pts_per_center = points_per_class // n_centers
+        remainder = points_per_class - pts_per_center * n_centers
+
+        all_pts: list[np.ndarray] = []
+        for k, (cx, cy) in enumerate(centers):
+            n = pts_per_center + (1 if k < remainder else 0)
+            if n <= 0:
+                continue
+            pts = rng.uniform(-float(noise_std), float(noise_std), size=(n, 2)).astype(np.float32)
+            pts[:, 0] += cx
+            pts[:, 1] += cy
+            all_pts.append(pts)
+
+        if not all_pts:
+            raise ValueError("checkerboard config produced no samples for a class.")
+
+        x_parts.append(np.vstack(all_pts))
+        y_parts.append(np.full(points_per_class, class_id, dtype=np.int64))
+
+    return np.vstack(x_parts), np.concatenate(y_parts)
+
+
+def generate_random_checkerboard(
+    points_per_class: int,
+    num_classes: int,
+    noise_std: float,
+    random_seed: int,
+    grid_size: int = 4,
+) -> tuple[np.ndarray, np.ndarray]:
+    return generate_checkerboard(
+        points_per_class=points_per_class,
+        num_classes=num_classes,
+        noise_std=noise_std,
+        random_seed=random_seed,
+        grid_size=grid_size,
+        random_tile_classes=True,
+    )
+
+
 def save_mnist_visualizations(
     x_train: np.ndarray,
     y_train: np.ndarray,
@@ -163,13 +438,15 @@ def save_mnist_visualizations(
     plt.close()
 
 
-def save_spiral_visualizations(
+def _save_2d_dataset_visualizations(
     x_train: np.ndarray,
     y_train: np.ndarray,
     x_test: np.ndarray,
     y_test: np.ndarray,
     num_classes: int,
     out_dir: Path,
+    title_prefix: str,
+    output_name: str,
 ) -> None:
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     cmap = plt.get_cmap("tab10")
@@ -186,7 +463,7 @@ def save_spiral_visualizations(
                 linewidths=0.2,
                 label=f"Class {class_id}",
             )
-    axes[0].set_title("Spiral Training Samples")
+    axes[0].set_title(f"{title_prefix} Training Samples")
     axes[0].grid(True, alpha=0.3)
     axes[0].legend(ncol=2, fontsize=8)
 
@@ -203,13 +480,33 @@ def save_spiral_visualizations(
                 linewidths=0.2,
                 label=f"Class {class_id}",
             )
-    axes[1].set_title("Spiral Test Samples")
+    axes[1].set_title(f"{title_prefix} Test Samples")
     axes[1].grid(True, alpha=0.3)
     axes[1].legend(ncol=2, fontsize=8)
 
     plt.tight_layout()
-    plt.savefig(out_dir / "spiral_dataset_samples.png", dpi=150, bbox_inches="tight")
+    plt.savefig(out_dir / output_name, dpi=150, bbox_inches="tight")
     plt.close()
+
+
+def save_spiral_visualizations(
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    x_test: np.ndarray,
+    y_test: np.ndarray,
+    num_classes: int,
+    out_dir: Path,
+) -> None:
+    _save_2d_dataset_visualizations(
+        x_train=x_train,
+        y_train=y_train,
+        x_test=x_test,
+        y_test=y_test,
+        num_classes=num_classes,
+        out_dir=out_dir,
+        title_prefix="Spiral",
+        output_name="spiral_dataset_samples.png",
+    )
 
 
 def _ensure_mnist_raw_files(data_dir: Path) -> dict[str, Path]:
@@ -338,6 +635,264 @@ def _load_spiral_bundle(data_cfg: dict, output_dir: Path) -> DatasetBundle:
     )
 
 
+def _load_gaussian_blobs_bundle(data_cfg: dict, output_dir: Path) -> DatasetBundle:
+    _validate_gaussian_blobs_config(data_cfg)
+    num_classes = int(data_cfg.get("num_classes", 3))
+    points_per_class = int(data_cfg.get("points_per_class", 1000))
+    random_seed = int(data_cfg.get("random_seed", 0))
+
+    x_train, y_train = generate_gaussian_blobs(
+        points_per_class=points_per_class,
+        num_classes=num_classes,
+        noise_std=float(data_cfg.get("noise_std", 0.1)),
+        random_seed=random_seed,
+        center_radius=float(data_cfg.get("center_radius", 2.0)),
+    )
+    x_test, y_test = generate_gaussian_blobs(
+        points_per_class=points_per_class,
+        num_classes=num_classes,
+        noise_std=float(data_cfg.get("noise_std", 0.1)),
+        random_seed=random_seed + 1,
+        center_radius=float(data_cfg.get("center_radius", 2.0)),
+    )
+
+    _save_2d_dataset_visualizations(
+        x_train=x_train,
+        y_train=y_train,
+        x_test=x_test,
+        y_test=y_test,
+        num_classes=num_classes,
+        out_dir=output_dir,
+        title_prefix="Gaussian Blobs",
+        output_name="gaussian_blobs_dataset_samples.png",
+    )
+
+    x_train_arr = np.asarray(x_train, dtype=np.float32)
+    x_test_arr = np.asarray(x_test, dtype=np.float32)
+    y_train_arr = np.asarray(y_train, dtype=np.int64)
+    y_test_arr = np.asarray(y_test, dtype=np.int64)
+
+    class_to_indices = build_class_index_map(y_train_arr, num_classes)
+
+    return DatasetBundle(
+        train_inputs=x_train_arr,
+        train_targets=y_train_arr,
+        test_inputs=x_test_arr,
+        test_targets=y_test_arr,
+        class_to_indices=class_to_indices,
+        num_classes=num_classes,
+        input_shape=(2,),
+    )
+
+
+def _load_rings_bundle(data_cfg: dict, output_dir: Path) -> DatasetBundle:
+    _validate_rings_config(data_cfg)
+    num_classes = int(data_cfg.get("num_classes", 4))
+    points_per_class = int(data_cfg.get("points_per_class", 1000))
+    random_seed = int(data_cfg.get("random_seed", 0))
+
+    x_train, y_train = generate_rings(
+        points_per_class=points_per_class,
+        num_classes=num_classes,
+        noise_std=float(data_cfg.get("noise_std", 0.1)),
+        random_seed=random_seed,
+        center_radius=float(data_cfg.get("center_radius", 3.0)),
+        class_separation=float(data_cfg.get("class_separation", 1.0)),
+        num_rings=int(data_cfg.get("num_rings", 3)),
+    )
+    x_test, y_test = generate_rings(
+        points_per_class=points_per_class,
+        num_classes=num_classes,
+        noise_std=float(data_cfg.get("noise_std", 0.1)),
+        random_seed=random_seed + 1,
+        center_radius=float(data_cfg.get("center_radius", 3.0)),
+        class_separation=float(data_cfg.get("class_separation", 1.0)),
+        num_rings=int(data_cfg.get("num_rings", 3)),
+    )
+
+    _save_2d_dataset_visualizations(
+        x_train=x_train,
+        y_train=y_train,
+        x_test=x_test,
+        y_test=y_test,
+        num_classes=num_classes,
+        out_dir=output_dir,
+        title_prefix="Rings",
+        output_name="rings_dataset_samples.png",
+    )
+
+    x_train_arr = np.asarray(x_train, dtype=np.float32)
+    x_test_arr = np.asarray(x_test, dtype=np.float32)
+    y_train_arr = np.asarray(y_train, dtype=np.int64)
+    y_test_arr = np.asarray(y_test, dtype=np.int64)
+
+    class_to_indices = build_class_index_map(y_train_arr, num_classes)
+
+    return DatasetBundle(
+        train_inputs=x_train_arr,
+        train_targets=y_train_arr,
+        test_inputs=x_test_arr,
+        test_targets=y_test_arr,
+        class_to_indices=class_to_indices,
+        num_classes=num_classes,
+        input_shape=(2,),
+    )
+
+
+def _load_bimodal_bundle(data_cfg: dict, output_dir: Path) -> DatasetBundle:
+    _validate_bimodal_config(data_cfg)
+    num_classes = int(data_cfg.get("num_classes", 4))
+    points_per_class = int(data_cfg.get("points_per_class", 1000))
+    random_seed = int(data_cfg.get("random_seed", 0))
+
+    x_train, y_train = generate_bimodal_classes(
+        points_per_class=points_per_class,
+        num_classes=num_classes,
+        class_separation=float(data_cfg.get("class_separation", 1.5)),
+        noise_std=float(data_cfg.get("noise_std", 0.15)),
+        random_seed=random_seed,
+        center_radius=float(data_cfg.get("center_radius", 2.5)),
+        num_modes=int(data_cfg.get("num_modes", 3)),
+    )
+    x_test, y_test = generate_bimodal_classes(
+        points_per_class=points_per_class,
+        num_classes=num_classes,
+        class_separation=float(data_cfg.get("class_separation", 1.5)),
+        noise_std=float(data_cfg.get("noise_std", 0.15)),
+        random_seed=random_seed + 1,
+        center_radius=float(data_cfg.get("center_radius", 2.5)),
+        num_modes=int(data_cfg.get("num_modes", 3)),
+    )
+
+    _save_2d_dataset_visualizations(
+        x_train=x_train,
+        y_train=y_train,
+        x_test=x_test,
+        y_test=y_test,
+        num_classes=num_classes,
+        out_dir=output_dir,
+        title_prefix="Bimodal Classes",
+        output_name="bimodal_dataset_samples.png",
+    )
+
+    x_train_arr = np.asarray(x_train, dtype=np.float32)
+    x_test_arr = np.asarray(x_test, dtype=np.float32)
+    y_train_arr = np.asarray(y_train, dtype=np.int64)
+    y_test_arr = np.asarray(y_test, dtype=np.int64)
+
+    class_to_indices = build_class_index_map(y_train_arr, num_classes)
+
+    return DatasetBundle(
+        train_inputs=x_train_arr,
+        train_targets=y_train_arr,
+        test_inputs=x_test_arr,
+        test_targets=y_test_arr,
+        class_to_indices=class_to_indices,
+        num_classes=num_classes,
+        input_shape=(2,),
+    )
+
+
+def _load_checkerboard_bundle(data_cfg: dict, output_dir: Path) -> DatasetBundle:
+    _validate_checkerboard_config(data_cfg)
+    num_classes = int(data_cfg.get("num_classes", 3))
+    points_per_class = int(data_cfg.get("points_per_class", 1000))
+    random_seed = int(data_cfg.get("random_seed", 0))
+
+    x_train, y_train = generate_checkerboard(
+        points_per_class=points_per_class,
+        num_classes=num_classes,
+        noise_std=float(data_cfg.get("noise_std", 0.0)),
+        random_seed=random_seed,
+        grid_size=int(data_cfg.get("grid_size", 4)),
+    )
+    x_test, y_test = generate_checkerboard(
+        points_per_class=points_per_class,
+        num_classes=num_classes,
+        noise_std=float(data_cfg.get("noise_std", 0.0)),
+        random_seed=random_seed + 1,
+        grid_size=int(data_cfg.get("grid_size", 4)),
+    )
+
+    _save_2d_dataset_visualizations(
+        x_train=x_train,
+        y_train=y_train,
+        x_test=x_test,
+        y_test=y_test,
+        num_classes=num_classes,
+        out_dir=output_dir,
+        title_prefix="Checkerboard",
+        output_name="checkerboard_dataset_samples.png",
+    )
+
+    x_train_arr = np.asarray(x_train, dtype=np.float32)
+    x_test_arr = np.asarray(x_test, dtype=np.float32)
+    y_train_arr = np.asarray(y_train, dtype=np.int64)
+    y_test_arr = np.asarray(y_test, dtype=np.int64)
+
+    class_to_indices = build_class_index_map(y_train_arr, num_classes)
+
+    return DatasetBundle(
+        train_inputs=x_train_arr,
+        train_targets=y_train_arr,
+        test_inputs=x_test_arr,
+        test_targets=y_test_arr,
+        class_to_indices=class_to_indices,
+        num_classes=num_classes,
+        input_shape=(2,),
+    )
+
+
+def _load_random_checkerboard_bundle(data_cfg: dict, output_dir: Path) -> DatasetBundle:
+    _validate_checkerboard_config(data_cfg)
+    num_classes = int(data_cfg.get("num_classes", 3))
+    points_per_class = int(data_cfg.get("points_per_class", 1000))
+    random_seed = int(data_cfg.get("random_seed", 0))
+
+    x_train, y_train = generate_random_checkerboard(
+        points_per_class=points_per_class,
+        num_classes=num_classes,
+        noise_std=float(data_cfg.get("noise_std", 0.0)),
+        random_seed=random_seed,
+        grid_size=int(data_cfg.get("grid_size", 4)),
+    )
+    x_test, y_test = generate_random_checkerboard(
+        points_per_class=points_per_class,
+        num_classes=num_classes,
+        noise_std=float(data_cfg.get("noise_std", 0.0)),
+        random_seed=random_seed + 1,
+        grid_size=int(data_cfg.get("grid_size", 4)),
+    )
+
+    _save_2d_dataset_visualizations(
+        x_train=x_train,
+        y_train=y_train,
+        x_test=x_test,
+        y_test=y_test,
+        num_classes=num_classes,
+        out_dir=output_dir,
+        title_prefix="Random checkerboard",
+        output_name="random_checkerboard_dataset_samples.png",
+    )
+
+    x_train_arr = np.asarray(x_train, dtype=np.float32)
+    x_test_arr = np.asarray(x_test, dtype=np.float32)
+    y_train_arr = np.asarray(y_train, dtype=np.int64)
+    y_test_arr = np.asarray(y_test, dtype=np.int64)
+
+    class_to_indices = build_class_index_map(y_train_arr, num_classes)
+
+    return DatasetBundle(
+        train_inputs=x_train_arr,
+        train_targets=y_train_arr,
+        test_inputs=x_test_arr,
+        test_targets=y_test_arr,
+        class_to_indices=class_to_indices,
+        num_classes=num_classes,
+        input_shape=(2,),
+    )
+
+
 def build_dataset_bundle(config: dict, output_dir: Path) -> DatasetBundle:
     data_cfg = config.get("data", {})
     dataset_name = str(data_cfg.get("dataset_name", "spiral")).strip().lower()
@@ -345,4 +900,17 @@ def build_dataset_bundle(config: dict, output_dir: Path) -> DatasetBundle:
         return _load_mnist_bundle(data_cfg, output_dir)
     if dataset_name == "spiral":
         return _load_spiral_bundle(data_cfg, output_dir)
-    raise ValueError(f"Unsupported dataset_name '{dataset_name}'. Expected 'mnist' or 'spiral'.")
+    if dataset_name == "gaussian_blobs":
+        return _load_gaussian_blobs_bundle(data_cfg, output_dir)
+    if dataset_name == "bimodal":
+        return _load_bimodal_bundle(data_cfg, output_dir)
+    if dataset_name == "rings":
+        return _load_rings_bundle(data_cfg, output_dir)
+    if dataset_name == "checkerboard":
+        return _load_checkerboard_bundle(data_cfg, output_dir)
+    if dataset_name == "random_checkerboard":
+        return _load_random_checkerboard_bundle(data_cfg, output_dir)
+    raise ValueError(
+        "Unsupported dataset_name "
+        f"'{dataset_name}'. Expected 'mnist', 'spiral', 'gaussian_blobs', 'bimodal', 'rings', 'checkerboard', or 'random_checkerboard'."
+    )

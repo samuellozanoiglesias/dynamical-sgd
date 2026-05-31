@@ -21,9 +21,10 @@ import numpy as np
 
 CLASS_ID_RE = re.compile(r"class_(\d+)")
 GEO_CLASS_ID_RE = re.compile(r"cyl_(?:half_length|radius)_class_(\d+)")
+AXIS_INDEX_RE = re.compile(r"cyl_axis_index_class_(\d+)")
 GEO_PAIR_RE = re.compile(r"^cyl_overlap_(\d+)v(\d+)$")
 GEO_PAIR_FALLBACK_RE = re.compile(r"^ellipsoid_overlap_(\d+)v(\d+)$")
-EPS = 1e-12
+EPS = 1e-140
 
 
 def _read_csv_header(csv_path: Path) -> list[str]:
@@ -78,6 +79,13 @@ def _infer_num_classes_from_geo_header(header: Iterable[str]) -> int:
 	if not class_ids:
 		raise ValueError("No class columns found in PCA geometric CSV.")
 	return max(class_ids) + 1
+
+
+def _has_axis_index(header: Iterable[str]) -> bool:
+	for name in header:
+		if AXIS_INDEX_RE.search(name):
+			return True
+	return False
 
 
 def _infer_class_pairs_from_geo_header(header: Iterable[str]) -> list[tuple[int, int]]:
@@ -217,6 +225,66 @@ def _plot_reobtained_classifier_metrics(
 	plt.close(fig)
 
 
+def _plot_reobtained_logit_margin(
+	csv_path: Path,
+	output_path: Path,
+	num_classes: int,
+	tpt_step: int = -1,
+) -> None:
+	rows = _load_csv_rows(csv_path)
+	if not rows:
+		raise ValueError(f"No classifier rows found in {csv_path}")
+
+	steps = np.asarray([int(row["global_step"]) for row in rows], dtype=np.int64)
+	margin_mean = np.asarray(
+		[[row.get(f"logit_margin_mean_class_{class_id}", float("nan")) for class_id in range(num_classes)] for row in rows],
+		dtype=np.float64,
+	)
+	margin_var = np.asarray(
+		[[row.get(f"logit_margin_var_class_{class_id}", float("nan")) for class_id in range(num_classes)] for row in rows],
+		dtype=np.float64,
+	)
+	margin_std = np.sqrt(np.clip(margin_var, 0.0, None))
+
+	fig, ax = plt.subplots(1, 1, figsize=(12, 7))
+	for class_id in range(num_classes):
+		color = None
+		if num_classes <= 10:
+			color = plt.get_cmap("tab10")(class_id % 10)
+		ax.plot(
+			steps,
+			margin_mean[:, class_id],
+			linewidth=1.8,
+			color=color,
+			label=f"class {class_id}",
+		)
+		ax.fill_between(
+			steps,
+			margin_mean[:, class_id] - margin_std[:, class_id],
+			margin_mean[:, class_id] + margin_std[:, class_id],
+			color=color,
+			alpha=0.18,
+			linewidth=0.0,
+		)
+
+	ax.set_title("Logit Margin (Mean ± sqrt(var))")
+	ax.set_xlabel("Global Step")
+	ax.set_ylabel("Logit Margin")
+	ax.set_ylim(-10.0, 35.0)
+	ax.grid(True, alpha=0.3)
+	if num_classes <= 12:
+		ax.legend(fontsize=8, ncol=2)
+
+	if tpt_step >= 0:
+		ax.axvline(tpt_step, color="black", linestyle="-", linewidth=2.0)
+
+	fig.suptitle("Logit Margin by Class", fontsize=16)
+	plt.tight_layout(rect=[0.0, 0.0, 1.0, 0.95])
+	output_path.parent.mkdir(parents=True, exist_ok=True)
+	plt.savefig(output_path, dpi=180, bbox_inches="tight")
+	plt.close(fig)
+
+
 def _plot_reobtained_geo_metrics(
 	csv_path: Path,
 	output_path: Path,
@@ -310,7 +378,7 @@ def _plot_reobtained_geo_metrics(
 	ax.set_xlabel("Global Step")
 	ax.set_ylabel("Overlap")
 	ax.set_yscale("log")
-	ax.set_ylim(1e-12, 1e-1)
+	ax.set_ylim(1e-80, 1e-1)
 	ax.grid(True, alpha=0.3)
 	ax.legend(fontsize=8, ncol=2)
 
@@ -325,7 +393,7 @@ def _plot_reobtained_geo_metrics(
 	ax.set_title("Ellipsoid Bhattacharyya Distance")
 	ax.set_xlabel("Global Step")
 	ax.set_ylabel("Distance")
-	ax.set_ylim(0.0, 12.0)
+	ax.set_ylim(0.0, 185.0)
 	ax.grid(True, alpha=0.3)
 	ax.legend(fontsize=8, ncol=2)
 
@@ -334,6 +402,42 @@ def _plot_reobtained_geo_metrics(
 			axis.axvline(tpt_step, color="black", linestyle="-", linewidth=2.0)
 
 	fig.suptitle("PCA Geometric Overlap Metrics", fontsize=16)
+	plt.tight_layout(rect=[0.0, 0.0, 1.0, 0.95])
+	output_path.parent.mkdir(parents=True, exist_ok=True)
+	plt.savefig(output_path, dpi=180, bbox_inches="tight")
+	plt.close(fig)
+
+
+def _plot_reobtained_geo_axis_index(
+	csv_path: Path,
+	output_path: Path,
+	num_classes: int,
+	tpt_step: int = -1,
+) -> None:
+	rows = _load_csv_rows(csv_path)
+	if not rows:
+		raise ValueError(f"No geometric overlap rows found in {csv_path}")
+
+	steps = np.asarray([int(row["global_step"]) for row in rows], dtype=np.int64)
+	axis_index_by_class = np.asarray(
+		[[row.get(f"cyl_axis_index_class_{class_id}", float("nan")) for class_id in range(num_classes)] for row in rows],
+		dtype=np.float64,
+	)
+
+	fig, ax = plt.subplots(1, 1, figsize=(8, 4))
+	for class_id in range(num_classes):
+		ax.plot(steps, axis_index_by_class[:, class_id], linewidth=1.6, label=f"class {class_id}")
+	ax.set_title("Cylinder Principal Axis Index over Training")
+	ax.set_xlabel("Global Step")
+	ax.set_ylabel("Axis Index (1-based)")
+	ax.grid(True, alpha=0.3)
+	if num_classes <= 12:
+		ax.legend(fontsize=8, ncol=2)
+
+	if tpt_step >= 0:
+		ax.axvline(tpt_step, color="black", linestyle="-", linewidth=2.0)
+
+	fig.suptitle("PCA Geometric Axis Index", fontsize=16)
 	plt.tight_layout(rect=[0.0, 0.0, 1.0, 0.95])
 	output_path.parent.mkdir(parents=True, exist_ok=True)
 	plt.savefig(output_path, dpi=180, bbox_inches="tight")
@@ -385,6 +489,14 @@ def reobtain_plots(run_dir: Path) -> list[Path]:
 			tpt_step=tpt_step,
 		)
 		outputs.append(output_path)
+		logit_output_path = run_dir / "REOBTAINED_logit.png"
+		_plot_reobtained_logit_margin(
+			csv_path=classifier_csv,
+			output_path=logit_output_path,
+			num_classes=num_classes,
+			tpt_step=tpt_step,
+		)
+		outputs.append(logit_output_path)
 	else:
 		print(f"[reobtain] Missing classifier_metrics.csv in {run_dir}")
 
@@ -402,6 +514,15 @@ def reobtain_plots(run_dir: Path) -> list[Path]:
 			tpt_step=tpt_step,
 		)
 		outputs.append(output_path)
+		if _has_axis_index(header):
+			axis_output_path = run_dir / "REOBTAINED_cylinder_length_index.png"
+			_plot_reobtained_geo_axis_index(
+				csv_path=geo_csv,
+				output_path=axis_output_path,
+				num_classes=num_classes,
+				tpt_step=tpt_step,
+			)
+			outputs.append(axis_output_path)
 	else:
 		print(f"[reobtain] Missing PCA_geometric.csv in {run_dir}")
 

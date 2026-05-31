@@ -1,0 +1,50 @@
+use_gpu: false
+
+data:
+  dataset_name: mnist
+  data_dir: ./data
+  num_classes: 10
+  random_seed: 0
+model:
+  architecture: resnet18
+  init_type: glorot
+  resnet_base_width: 64
+  use_bias: true
+training:
+  training_steps: 25000
+  save_metrics_every_n_steps: 50
+  batch_size: 200
+  random_seed: 42
+  loss: cross_entropy
+optimizer:
+  beta1: 0.9
+  beta2: 0.999
+  eps: 1.0e-08
+  gradient_clipping: null
+  l2_reg: 0.0
+  learning_rate: 0.01
+  momentum: 0.9
+  optimizer_type: adam
+dynamics:
+  bumps_before_TPT: false
+  bumps_at_TPT: false
+  period_length: 5000
+  w_max: 70.0
+  amplitude: 1.0
+  # Optional class order for bump focus (length must equal num_classes; duplicates allowed).
+  # Example: [1,0,1] repeats classes and can skip others.
+  bump_order: 
+  tpt_accuracy_threshold: 1.0
+analysis:
+  metric_subset_size: 5000
+  plot_version: simplified
+  outputs:
+    classifier_metrics: true
+    nc_metrics: true
+    separability_metrics: false
+    pca_analysis: false
+    pca_geometric: true
+  pca:
+    projected_dims: [1, 2, 3, 5]
+output:
+  output_dir: /data/samuel_lozano/dynamical-sgd

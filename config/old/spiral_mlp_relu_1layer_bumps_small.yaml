@@ -45,6 +45,7 @@ dynamics:
   bump_order: [0,1,2]
   tpt_accuracy_threshold: 1.0
 analysis:
+  plot_version: full
   outputs:
     classifier_metrics: true
     nc_metrics: false

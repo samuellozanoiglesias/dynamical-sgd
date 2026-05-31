@@ -17,8 +17,10 @@ class GeoEpochRaw:
     cyl_overlap_by_pair: np.ndarray
     ellipsoid_bhattacharyya_by_pair: np.ndarray
     ellipsoid_overlap_by_pair: np.ndarray
+    cyl_axis_cosine_by_pair: np.ndarray
     cyl_half_length_by_class: np.ndarray
     cyl_radius_by_class: np.ndarray
+    cyl_axis_index_by_class: np.ndarray
 
 
 def _flatten_features(x: np.ndarray) -> np.ndarray:
@@ -35,6 +37,7 @@ def _compute_class_stats(
     axes = np.zeros((num_classes, dim), dtype=np.float64)
     half_lengths = np.zeros(num_classes, dtype=np.float64)
     radii = np.zeros(num_classes, dtype=np.float64)
+    axis_indices = np.zeros(num_classes, dtype=np.float64)
     covs = np.zeros((num_classes, dim, dim), dtype=np.float64)
 
     class_counts = np.bincount(targets, minlength=num_classes).astype(np.int64)
@@ -73,6 +76,14 @@ def _compute_class_stats(
             axis = np.zeros(0, dtype=np.float64)
 
         axes[class_id] = axis
+        # record the 1-based index of the input dimension with largest absolute
+        # loading in the leading eigenvector; this lets us track which original
+        # feature dimension dominates the principal direction over time.
+        if axis.size > 0:
+            axis_idx = int(np.argmax(np.abs(axis))) + 1
+        else:
+            axis_idx = 1
+        axis_indices[class_id] = float(axis_idx)
         if eigvals.size > 0:
             half_lengths[class_id] = float(np.sqrt(eigvals[0]))
         if eigvals.size > 1:
@@ -82,7 +93,7 @@ def _compute_class_stats(
 
         covs[class_id] = cov + REG_EPS * np.eye(dim, dtype=np.float64)
 
-    return means, axes, half_lengths, radii, covs
+    return means, axes, half_lengths, radii, covs, axis_indices
 
 
 def _cylinder_overlap(
@@ -154,7 +165,7 @@ def collect_geo_epoch(
     if features.shape[0] == 0:
         raise ValueError("No samples provided for geometric overlap metrics.")
 
-    means, axes, half_lengths, radii, covs = _compute_class_stats(
+    means, axes, half_lengths, radii, covs, axis_indices = _compute_class_stats(
         features=features,
         targets=targets_arr,
         num_classes=num_classes,
@@ -163,6 +174,7 @@ def collect_geo_epoch(
     cyl_overlap_by_pair = np.zeros(len(class_pairs), dtype=np.float64)
     ellipsoid_bhattacharyya_by_pair = np.zeros(len(class_pairs), dtype=np.float64)
     ellipsoid_overlap_by_pair = np.zeros(len(class_pairs), dtype=np.float64)
+    cyl_axis_cosine_by_pair = np.zeros(len(class_pairs), dtype=np.float64)
 
     for pair_idx, (left, right) in enumerate(class_pairs):
         delta = means[right] - means[left]
@@ -175,6 +187,8 @@ def collect_geo_epoch(
             r_i=float(radii[left]),
             r_j=float(radii[right]),
         )
+        axis_cos = float(abs(np.dot(axes[left], axes[right])))
+        cyl_axis_cosine_by_pair[pair_idx] = float(np.clip(axis_cos, 0.0, 1.0))
 
         db = _bhattacharyya_distance(
             mu_i=means[left],
@@ -194,8 +208,10 @@ def collect_geo_epoch(
         cyl_overlap_by_pair=cyl_overlap_by_pair.astype(np.float64),
         ellipsoid_bhattacharyya_by_pair=ellipsoid_bhattacharyya_by_pair.astype(np.float64),
         ellipsoid_overlap_by_pair=ellipsoid_overlap_by_pair.astype(np.float64),
+        cyl_axis_cosine_by_pair=cyl_axis_cosine_by_pair.astype(np.float64),
         cyl_half_length_by_class=half_lengths.astype(np.float64),
         cyl_radius_by_class=radii.astype(np.float64),
+        cyl_axis_index_by_class=axis_indices.astype(np.float64),
     )
 
 
@@ -209,8 +225,10 @@ def initialize_geo_csv(
         header.append(f"cyl_overlap_{left}v{right}")
         header.append(f"ellipsoid_bhattacharyya_{left}v{right}")
         header.append(f"ellipsoid_overlap_{left}v{right}")
+        header.append(f"cyl_axis_cosine_{left}v{right}")
     header.extend([f"cyl_half_length_class_{class_id}" for class_id in range(num_classes)])
     header.extend([f"cyl_radius_class_{class_id}" for class_id in range(num_classes)])
+    header.extend([f"cyl_axis_index_class_{class_id}" for class_id in range(num_classes)])
 
     with open(csv_path, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
@@ -229,8 +247,10 @@ def append_geo_csv_row(
         row.append(float(raw.cyl_overlap_by_pair[idx]))
         row.append(float(raw.ellipsoid_bhattacharyya_by_pair[idx]))
         row.append(float(raw.ellipsoid_overlap_by_pair[idx]))
+        row.append(float(raw.cyl_axis_cosine_by_pair[idx]))
     row.extend(raw.cyl_half_length_by_class[:num_classes].tolist())
     row.extend(raw.cyl_radius_by_class[:num_classes].tolist())
+    row.extend(raw.cyl_axis_index_by_class[:num_classes].tolist())
 
     with open(csv_path, "a", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
@@ -279,6 +299,10 @@ def finalize_geo_plots(
         [[row[f"ellipsoid_overlap_{left}v{right}"] for left, right in class_pairs] for row in rows],
         dtype=np.float64,
     )
+    cyl_axis_cosine_by_pair = np.asarray(
+        [[row.get(f"cyl_axis_cosine_{left}v{right}", float("nan")) for left, right in class_pairs] for row in rows],
+        dtype=np.float64,
+    )
     cyl_half_length_by_class = np.asarray(
         [[row[f"cyl_half_length_class_{class_id}"] for class_id in range(num_classes)] for row in rows],
         dtype=np.float64,
@@ -287,6 +311,17 @@ def finalize_geo_plots(
         [[row[f"cyl_radius_class_{class_id}"] for class_id in range(num_classes)] for row in rows],
         dtype=np.float64,
     )
+
+    # try to collect axis index history if present
+    axis_index_key = f"cyl_axis_index_class_0"
+    has_axis_index = axis_index_key in rows[0]
+    if has_axis_index:
+        cyl_axis_index_by_class = np.asarray(
+            [[row.get(f"cyl_axis_index_class_{class_id}", float("nan")) for class_id in range(num_classes)] for row in rows],
+            dtype=np.float64,
+        )
+    else:
+        cyl_axis_index_by_class = None
 
     fig, axes = plt.subplots(2, 2, figsize=(16, 12), sharex=True)
 
@@ -380,6 +415,228 @@ def finalize_geo_plots(
     if tpt_step >= 0:
         for axis in axes.flat:
             axis.axvline(tpt_step, color="black", linestyle="-", linewidth=2.0)
+
+    # If axis indices were recorded, also save a separate plot showing index vs step
+    if cyl_axis_index_by_class is not None:
+        try:
+            idx_fig, (idx_ax, ang_ax) = plt.subplots(1, 2, figsize=(14, 4), sharex=True)
+            for class_id in range(num_classes):
+                idx_ax.plot(steps, cyl_axis_index_by_class[:, class_id], linewidth=1.6, label=f"class {class_id}")
+            idx_ax.set_title("Cylinder Principal Axis Index")
+            idx_ax.set_xlabel("Global Step")
+            idx_ax.set_ylabel("Axis Index (1-based)")
+            idx_ax.grid(True, alpha=0.3)
+            idx_ax.legend(fontsize=8)
+
+            for pair_idx, (left, right) in enumerate(class_pairs):
+                ang_ax.plot(steps, cyl_axis_cosine_by_pair[:, pair_idx], linewidth=1.6, label=f"{left}v{right}")
+            ang_ax.set_title("Principal Axis Alignment (|v_i · v_j|)")
+            ang_ax.set_xlabel("Global Step")
+            ang_ax.set_ylabel("Cosine")
+            ang_ax.set_ylim(0.0, 1.02)
+            ang_ax.grid(True, alpha=0.3)
+            ang_ax.legend(fontsize=8, ncol=2)
+
+            if tpt_step >= 0:
+                idx_ax.axvline(tpt_step, color="black", linestyle="-", linewidth=2.0)
+                ang_ax.axvline(tpt_step, color="black", linestyle="-", linewidth=2.0)
+            idx_out = output_path.parent / "cylinder_length_index.png"
+            idx_out.parent.mkdir(parents=True, exist_ok=True)
+            idx_fig.tight_layout()
+            idx_fig.savefig(idx_out, dpi=180, bbox_inches="tight")
+            plt.close(idx_fig)
+        except Exception:
+            pass
+
+    fig.suptitle("PCA Geometric Overlap Metrics", fontsize=16)
+    plt.tight_layout(rect=[0.0, 0.0, 1.0, 0.95])
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+
+
+def finalize_geo_plots_simplified(
+    csv_path: Path,
+    output_path: Path,
+    num_classes: int,
+    class_pairs: list[tuple[int, int]],
+    tpt_step: int = -1,
+) -> None:
+    rows = _load_geo_columns(csv_path)
+    if not rows:
+        raise ValueError(f"No geometric overlap rows found in {csv_path}")
+
+    steps = np.asarray([int(row["global_step"]) for row in rows], dtype=np.int64)
+    cyl_overlap_by_pair = np.asarray(
+        [
+            [row.get(f"cyl_overlap_{left}v{right}", float("nan")) for left, right in class_pairs]
+            for row in rows
+        ],
+        dtype=np.float64,
+    )
+    ellipsoid_bhattacharyya_by_pair = np.asarray(
+        [
+            [row.get(f"ellipsoid_bhattacharyya_{left}v{right}", float("nan")) for left, right in class_pairs]
+            for row in rows
+        ],
+        dtype=np.float64,
+    )
+    ellipsoid_overlap_by_pair = np.asarray(
+        [
+            [row.get(f"ellipsoid_overlap_{left}v{right}", float("nan")) for left, right in class_pairs]
+            for row in rows
+        ],
+        dtype=np.float64,
+    )
+    cyl_axis_cosine_by_pair = np.asarray(
+        [
+            [row.get(f"cyl_axis_cosine_{left}v{right}", float("nan")) for left, right in class_pairs]
+            for row in rows
+        ],
+        dtype=np.float64,
+    )
+    cyl_half_length_by_class = np.asarray(
+        [
+            [row.get(f"cyl_half_length_class_{class_id}", float("nan")) for class_id in range(num_classes)]
+            for row in rows
+        ],
+        dtype=np.float64,
+    )
+    cyl_radius_by_class = np.asarray(
+        [
+            [row.get(f"cyl_radius_class_{class_id}", float("nan")) for class_id in range(num_classes)]
+            for row in rows
+        ],
+        dtype=np.float64,
+    )
+
+    # try to collect axis index history if present
+    axis_index_key = f"cyl_axis_index_class_0"
+    has_axis_index = axis_index_key in rows[0]
+    if has_axis_index:
+        cyl_axis_index_by_class = np.asarray(
+            [
+                [row.get(f"cyl_axis_index_class_{class_id}", float("nan")) for class_id in range(num_classes)]
+                for row in rows
+            ],
+            dtype=np.float64,
+        )
+    else:
+        cyl_axis_index_by_class = None
+
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12), sharex=True)
+
+    ax = axes[0, 0]
+    for pair_idx, (left, right) in enumerate(class_pairs):
+        ax.plot(
+            steps,
+            cyl_overlap_by_pair[:, pair_idx],
+            linewidth=1.6,
+            label=f"{left}v{right}",
+        )
+    ax.set_title("Cylinder Overlap")
+    ax.set_ylabel("Overlap")
+    ax.set_ylim(0.0, 1.02)
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8, ncol=2)
+
+    ax = axes[0, 1]
+    colors = plt.rcParams.get("axes.prop_cycle", None)
+    color_list = None
+    if colors is not None:
+        color_list = colors.by_key().get("color")
+    if not color_list:
+        color_list = ["C0", "C1", "C2", "C3", "C4", "C5", "C6", "C7"]
+
+    for class_id in range(num_classes):
+        color = color_list[class_id % len(color_list)]
+        ax.plot(
+            steps,
+            cyl_half_length_by_class[:, class_id],
+            linewidth=1.8,
+            color=color,
+            label=f"L class {class_id}",
+        )
+        ax.plot(
+            steps,
+            cyl_radius_by_class[:, class_id],
+            linewidth=1.5,
+            linestyle="--",
+            color=color,
+            label=f"r class {class_id}",
+        )
+    ax.set_title("Cylinder Half-Lengths and Radii")
+    ax.set_ylabel("Length / Radius")
+    ax.set_ylim(0.0, 20.0)
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=7, ncol=2)
+
+    ax = axes[1, 0]
+    overlap_plot = np.clip(ellipsoid_overlap_by_pair, EPS, None)
+    for pair_idx, (left, right) in enumerate(class_pairs):
+        ax.plot(
+            steps,
+            overlap_plot[:, pair_idx],
+            linewidth=1.6,
+            label=f"{left}v{right}",
+        )
+    ax.set_title("Ellipsoid Overlap (Bhattacharyya Coefficient)")
+    ax.set_xlabel("Global Step")
+    ax.set_ylabel("Overlap")
+    ax.set_yscale("log")
+    ax.set_ylim(1e-12, 1e-1)
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8, ncol=2)
+
+    ax = axes[1, 1]
+    for pair_idx, (left, right) in enumerate(class_pairs):
+        ax.plot(
+            steps,
+            ellipsoid_bhattacharyya_by_pair[:, pair_idx],
+            linewidth=1.6,
+            label=f"{left}v{right}",
+        )
+    ax.set_title("Ellipsoid Bhattacharyya Distance")
+    ax.set_xlabel("Global Step")
+    ax.set_ylabel("Distance")
+    ax.set_ylim(0.0, 30.0)
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8, ncol=2)
+
+    if tpt_step >= 0:
+        for axis in axes.flat:
+            axis.axvline(tpt_step, color="black", linestyle="-", linewidth=2.0)
+
+    if cyl_axis_index_by_class is not None:
+        try:
+            idx_fig, (idx_ax, ang_ax) = plt.subplots(1, 2, figsize=(14, 4), sharex=True)
+            for class_id in range(num_classes):
+                idx_ax.plot(steps, cyl_axis_index_by_class[:, class_id], linewidth=1.6, label=f"class {class_id}")
+            idx_ax.set_title("Cylinder Principal Axis Index")
+            idx_ax.set_xlabel("Global Step")
+            idx_ax.set_ylabel("Axis Index (1-based)")
+            idx_ax.grid(True, alpha=0.3)
+            idx_ax.legend(fontsize=8)
+
+            for pair_idx, (left, right) in enumerate(class_pairs):
+                ang_ax.plot(steps, cyl_axis_cosine_by_pair[:, pair_idx], linewidth=1.6, label=f"{left}v{right}")
+            ang_ax.set_title("Principal Axis Alignment (|v_i · v_j|)")
+            ang_ax.set_xlabel("Global Step")
+            ang_ax.set_ylabel("Cosine")
+            ang_ax.set_ylim(0.0, 1.02)
+            ang_ax.grid(True, alpha=0.3)
+            ang_ax.legend(fontsize=8, ncol=2)
+
+            if tpt_step >= 0:
+                idx_ax.axvline(tpt_step, color="black", linestyle="-", linewidth=2.0)
+                ang_ax.axvline(tpt_step, color="black", linestyle="-", linewidth=2.0)
+            idx_out = output_path.parent / "cylinder_length_index.png"
+            idx_out.parent.mkdir(parents=True, exist_ok=True)
+            idx_fig.tight_layout()
+            idx_fig.savefig(idx_out, dpi=180, bbox_inches="tight")
+            plt.close(idx_fig)
+        except Exception:
+            pass
 
     fig.suptitle("PCA Geometric Overlap Metrics", fontsize=16)
     plt.tight_layout(rect=[0.0, 0.0, 1.0, 0.95])

@@ -20,11 +20,12 @@ from classifier_metrics import (
     collect_advanced_classifier_metrics,
     collect_classifier_epoch,
     finalize_classifier_dashboard,
+    finalize_classifier_simplified,
     initialize_classifier_csv,
 )
 from metrics import (
     plot_example_distribution_dynamics,
-    plot_spiral_decision_boundaries,
+    plot_2d_decision_boundaries,
     plot_training_report,
 )
 from neural_collapse import (
@@ -52,6 +53,7 @@ from PCA_geometric_overlapping import (
     append_geo_csv_row,
     collect_geo_epoch,
     finalize_geo_plots,
+    finalize_geo_plots_simplified,
     initialize_geo_csv,
 )
 from model import JAXModel, ParamTree, build_model
@@ -89,6 +91,18 @@ def _analysis_output_enabled(
         if key in analysis_cfg:
             return _as_bool(analysis_cfg[key])
     return default
+
+
+def _normalize_plot_version(raw: Any) -> str:
+    if raw is None:
+        return "full"
+    if isinstance(raw, str):
+        text = raw.strip().lower()
+        if text in {"", "full"}:
+            return "full"
+        if text == "simplified":
+            return "simplified"
+    raise ValueError("analysis.plot_version must be 'full' or 'simplified'.")
 
 
 def _normalize_freeze_part(raw: Any) -> str | None:
@@ -170,6 +184,64 @@ def _validate_bump_order(bump_order: list[int] | None, num_classes: int) -> list
                 f"Valid range is [0, {num_classes - 1}]."
             )
     return bump_order
+
+
+def _build_class_to_indices(targets: np.ndarray, num_classes: int) -> Dict[int, np.ndarray]:
+    return {
+        class_id: np.where(targets == class_id)[0].astype(np.int64, copy=False)
+        for class_id in range(num_classes)
+    }
+
+
+def _build_metric_subset(
+    inputs: np.ndarray,
+    targets: np.ndarray,
+    class_to_indices: Dict[int, np.ndarray],
+    num_classes: int,
+    subset_size: int,
+    rng: np.random.Generator,
+) -> tuple[np.ndarray, np.ndarray, Dict[int, np.ndarray]]:
+    total_samples = int(targets.shape[0])
+    subset_size = min(int(subset_size), total_samples)
+    if subset_size <= 0:
+        raise ValueError("analysis.metric_subset_size must be > 0")
+
+    if subset_size < num_classes:
+        chosen = rng.choice(total_samples, size=subset_size, replace=False)
+        subset_inputs = inputs[chosen]
+        subset_targets = targets[chosen]
+        return subset_inputs, subset_targets, _build_class_to_indices(subset_targets, num_classes)
+
+    counts = np.array(
+        [len(class_to_indices[class_id]) for class_id in range(num_classes)],
+        dtype=np.int64,
+    )
+    base = subset_size // num_classes
+    per_class = np.minimum(base, counts)
+    remaining = subset_size - int(per_class.sum())
+    if remaining > 0:
+        available = counts - per_class
+        if int(available.sum()) > 0:
+            extra = rng.multinomial(remaining, available / available.sum())
+            per_class += extra
+
+    chosen_indices: list[np.ndarray] = []
+    for class_id, count in enumerate(per_class):
+        if count <= 0:
+            continue
+        class_indices = class_to_indices[class_id]
+        replace = int(count) > class_indices.shape[0]
+        chosen = rng.choice(class_indices, size=int(count), replace=replace)
+        chosen_indices.append(chosen.astype(np.int64, copy=False))
+
+    if not chosen_indices:
+        raise ValueError("Metric subset selection produced an empty sample.")
+
+    chosen_all = np.concatenate(chosen_indices, axis=0)
+    chosen_all = rng.permutation(chosen_all)
+    subset_inputs = inputs[chosen_all]
+    subset_targets = targets[chosen_all]
+    return subset_inputs, subset_targets, _build_class_to_indices(subset_targets, num_classes)
 
 
 def _set_global_seed(seed: int) -> None:
@@ -449,6 +521,7 @@ def train_epoch(
     total_steps: int,
     bumps_enabled: bool,
     bumps_after_freeze: bool,
+    reinitialize_after_freeze: bool,
     period_length: int,
     w_max: float,
     bump_order: list[int] | None,
@@ -524,18 +597,19 @@ def train_epoch(
             and freeze_part is not None
             and global_step >= freeze_after_steps
         ):
-            reinit_key, subkey = jax.random.split(reinit_key)
-            new_params = model.init(subkey)
-            updated_params: ParamTree = dict(params)
             classifier_reset = False
-            if freeze_part == "classifier":
-                updated_params["hidden_layers"] = new_params["hidden_layers"]
-            elif freeze_part == "preclassifier":
-                updated_params["classifier"] = new_params["classifier"]
-                classifier_reset = True
+            if reinitialize_after_freeze:
+                reinit_key, subkey = jax.random.split(reinit_key)
+                new_params = model.init(subkey)
+                updated_params: ParamTree = dict(params)
+                if freeze_part == "classifier":
+                    updated_params["hidden_layers"] = new_params["hidden_layers"]
+                elif freeze_part == "preclassifier":
+                    updated_params["classifier"] = new_params["classifier"]
+                    classifier_reset = True
 
-            params = jax.device_put(updated_params, device=device)
-            opt_state = optimizer.init(params)
+                params = jax.device_put(updated_params, device=device)
+                opt_state = optimizer.init(params)
             grad_mask = _build_grad_mask(params, freeze_part)
             prev_params = params
             freeze_applied = True
@@ -696,6 +770,10 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
     training_cfg = config.get("training", {})
     dynamics_cfg = config.get("dynamics", {})
     optimizer_cfg = config.get("optimizer", {})
+    analysis_cfg = config.get("analysis", {})
+
+    dataset_name = str(data_cfg.get("dataset_name", "spiral"))
+    dataset_key = dataset_name.strip().lower()
 
     random_seed = int(training_cfg.get("random_seed", config.get("random_seed", 42)))
     _set_global_seed(random_seed)
@@ -752,6 +830,7 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
     bumps_before_tpt = _as_bool(dynamics_cfg.get("bumps_before_TPT", False))
     bumps_at_tpt = _as_bool(dynamics_cfg.get("bumps_at_TPT", False))
     bumps_after_freeze = _as_bool(dynamics_cfg.get("bumps_after_freeze", True))
+    reinitialize_after_freeze = _as_bool(dynamics_cfg.get("reinitialize", True))
     period_length = int(dynamics_cfg.get("period_length", 250))
     w_max = float(dynamics_cfg.get("w_max", 50.0))
 
@@ -768,6 +847,26 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
         )
 
     bump_order = _validate_bump_order(_parse_bump_order(dynamics_cfg.get("bump_order")), num_classes)
+
+    metric_inputs = dataset_bundle.train_inputs
+    metric_targets = dataset_bundle.train_targets
+    metric_subset_size: int | None = None
+    if dataset_key == "mnist":
+        metric_subset_size = int(
+            analysis_cfg.get("metric_subset_size", data_cfg.get("metric_subset_size", 5000))
+        )
+        metric_subset_size = max(metric_subset_size, num_classes)
+        metric_subset_size = min(metric_subset_size, dataset_bundle.train_inputs.shape[0])
+        if metric_subset_size < dataset_bundle.train_inputs.shape[0]:
+            metric_rng = np.random.default_rng(random_seed + 101)
+            metric_inputs, metric_targets, _ = _build_metric_subset(
+                inputs=dataset_bundle.train_inputs,
+                targets=dataset_bundle.train_targets,
+                class_to_indices=dataset_bundle.class_to_indices,
+                num_classes=num_classes,
+                subset_size=metric_subset_size,
+                rng=metric_rng,
+            )
 
     built_model = build_model(
         model_cfg=model_cfg,
@@ -807,8 +906,7 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
 
     csv_path = run_dir / "training_metrics.csv"
     figure_path = run_dir / "training_report.png"
-
-    analysis_cfg = config.get("analysis", {})
+    plot_version = _normalize_plot_version(analysis_cfg.get("plot_version"))
     enable_classifier_metrics = _analysis_output_enabled(analysis_cfg, ("classifier_metrics",))
     enable_nc_metrics = _analysis_output_enabled(analysis_cfg, ("nc_metrics",))
     enable_sep_metrics = _analysis_output_enabled(analysis_cfg, ("separability_metrics",))
@@ -946,6 +1044,7 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
                 total_steps=total_steps,
                 bumps_enabled=bumps_enabled,
                 bumps_after_freeze=bumps_after_freeze,
+                reinitialize_after_freeze=reinitialize_after_freeze,
                 period_length=period_length,
                 w_max=w_max,
                 bump_order=bump_order,
@@ -991,8 +1090,8 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
                 nc_raw = collect_nc_raw_epoch(
                     model=model,
                     params=params,
-                    inputs=dataset_bundle.train_inputs,
-                    targets=dataset_bundle.train_targets,
+                    inputs=metric_inputs,
+                    targets=metric_targets,
                     num_classes=num_classes,
                     class_pairs=nc_class_pairs,
                     eval_batch_size=eval_batch_size,
@@ -1009,8 +1108,8 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
                 sep_raw: SepEpochRaw = collect_sep_raw_epoch(
                     model=model,
                     params=params,
-                    inputs=dataset_bundle.train_inputs,
-                    targets=dataset_bundle.train_targets,
+                    inputs=metric_inputs,
+                    targets=metric_targets,
                     num_classes=num_classes,
                     class_pairs=nc_class_pairs,
                     eval_batch_size=eval_batch_size,
@@ -1030,8 +1129,8 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
                 pre_classifier, logits, labels = _collect_pre_classifier_outputs(
                     model=model,
                     params=params,
-                    inputs=dataset_bundle.train_inputs,
-                    targets=dataset_bundle.train_targets,
+                    inputs=metric_inputs,
+                    targets=metric_targets,
                     batch_size=eval_batch_size,
                     device=device,
                 )
@@ -1131,7 +1230,6 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
                 f"bumps {'on' if bump_state['active'] else 'off'} focus {focus_text}"
             )
 
-    dataset_name = str(data_cfg.get("dataset_name", "spiral"))
     architecture = str(model_cfg.get("architecture", "mlp"))
     plot_training_report(
         csv_path=csv_path,
@@ -1169,12 +1267,20 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
             tpt_step=tpt_step if tpt_reached else -1,
         )
     if enable_classifier_metrics:
-        finalize_classifier_dashboard(
-            csv_path=classifier_csv_path,
-            output_path=classifier_figure_path,
-            num_classes=num_classes,
-            tpt_step=tpt_step if tpt_reached else -1,
-        )
+        if plot_version == "simplified":
+            finalize_classifier_simplified(
+                csv_path=classifier_csv_path,
+                output_path=classifier_figure_path,
+                num_classes=num_classes,
+                tpt_step=tpt_step if tpt_reached else -1,
+            )
+        else:
+            finalize_classifier_dashboard(
+                csv_path=classifier_csv_path,
+                output_path=classifier_figure_path,
+                num_classes=num_classes,
+                tpt_step=tpt_step if tpt_reached else -1,
+            )
     if enable_pca_analysis:
         finalize_pca_analysis(
             csv_path=pca_csv_path,
@@ -1185,18 +1291,27 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
             tpt_step=tpt_step if tpt_reached else -1,
         )
     if enable_geo_metrics:
-        finalize_geo_plots(
-            csv_path=geo_csv_path,
-            output_path=geo_figure_path,
-            num_classes=num_classes,
-            class_pairs=nc_class_pairs,
-            tpt_step=tpt_step if tpt_reached else -1,
-        )
+        if plot_version == "simplified":
+            finalize_geo_plots_simplified(
+                csv_path=geo_csv_path,
+                output_path=geo_figure_path,
+                num_classes=num_classes,
+                class_pairs=nc_class_pairs,
+                tpt_step=tpt_step if tpt_reached else -1,
+            )
+        else:
+            finalize_geo_plots(
+                csv_path=geo_csv_path,
+                output_path=geo_figure_path,
+                num_classes=num_classes,
+                class_pairs=nc_class_pairs,
+                tpt_step=tpt_step if tpt_reached else -1,
+            )
 
     boundary_figure_path: Path | None = None
-    if dataset_name.strip().lower() == "spiral":
-        boundary_figure_path = run_dir / "spiral_decision_boundaries.png"
-        plot_spiral_decision_boundaries(
+    if dataset_key in {"spiral", "gaussian_blobs", "bimodal", "rings", "checkerboard", "random_checkerboard"}:
+        boundary_figure_path = run_dir / f"{dataset_key}_decision_boundaries.png"
+        plot_2d_decision_boundaries(
             model=model,
             params=params,
             train_inputs=dataset_bundle.train_inputs,
@@ -1220,8 +1335,11 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
         "freeze_applied": bool(freeze_step_applied is not None),
         "freeze_step": int(freeze_step_applied) if freeze_step_applied is not None else None,
         "bumps_after_freeze": bool(bumps_after_freeze),
+        "reinitialize_after_freeze": bool(reinitialize_after_freeze),
         "tpt_reached": bool(tpt_reached),
         "tpt_step": int(tpt_step),
+        "metric_subset_size": int(metric_subset_size) if metric_subset_size is not None else None,
+        "metric_subset_count": int(metric_inputs.shape[0]),
         "csv_path": str(csv_path),
         "nc_csv_path": str(nc_csv_path) if nc_csv_path is not None else None,
         "figure_path": str(figure_path),
