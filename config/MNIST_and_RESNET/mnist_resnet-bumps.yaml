@@ -8,10 +8,10 @@ data:
 model:
   architecture: resnet18
   init_type: glorot
-  resnet_base_width: 64
+  resnet_base_width: 16
   use_bias: true
 training:
-  training_steps: 25000
+  training_steps: 150000
   save_metrics_every_n_steps: 50
   batch_size: 200
   random_seed: 42
@@ -22,11 +22,11 @@ optimizer:
   eps: 1.0e-08
   gradient_clipping: null
   l2_reg: 0.0
-  learning_rate: 0.01
+  learning_rate: 0.0001
   momentum: 0.9
   optimizer_type: adam
 dynamics:
-  bumps_before_TPT: false
+  bumps_before_TPT: true
   bumps_at_TPT: false
   period_length: 5000
   w_max: 70.0

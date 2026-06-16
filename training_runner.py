@@ -56,6 +56,12 @@ from PCA_geometric_overlapping import (
     finalize_geo_plots_simplified,
     initialize_geo_csv,
 )
+from hyperplanes import (
+    append_hyperplane_csv_row,
+    collect_hyperplane_epoch,
+    finalize_hyperplane_plots,
+    initialize_hyperplane_csv,
+)
 from model import JAXModel, ParamTree, build_model
 
 
@@ -915,7 +921,10 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
         analysis_cfg,
         ("PCA_geometric", "pca_geometric", "pca_geometric_overlapping"),
     )
-    collect_pre_classifier = enable_classifier_metrics or enable_pca_analysis or enable_geo_metrics
+    collect_pre_classifier = (
+        enable_classifier_metrics or enable_pca_analysis
+        or enable_geo_metrics or enable_hp_metrics
+    )
 
     nc_class_pairs = build_nc_class_pairs(num_classes)
 
@@ -979,6 +988,16 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
             num_classes=num_classes,
             class_pairs=nc_class_pairs,
         )
+    
+    enable_hp_metrics = _analysis_output_enabled(
+    analysis_cfg, ("hyperplane_metrics", "hyperplanes")
+    )
+    hp_csv_path: Path | None = None
+    hp_figure_path: Path | None = None
+    if enable_hp_metrics:
+        hp_csv_path  = run_dir / "hyperplanes.csv"
+        hp_figure_path = run_dir / "hyperplanes.png"
+        initialize_hyperplane_csv(csv_path=hp_csv_path, num_classes=num_classes)
 
     predict_step = jax.jit(lambda step_params, batch_x: model.apply(step_params, batch_x))
 
@@ -1200,6 +1219,31 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
                     raw=geo_raw,
                     num_classes=num_classes,
                 )
+            
+            if enable_hp_metrics:
+                if pre_classifier is None or labels is None:
+                    raise RuntimeError(
+                        "Hyperplane metrics enabled but no pre-classifier outputs were collected."
+                    )
+                weight_matrix = np.asarray(model.classifier_weight_matrix(params), dtype=np.float64)
+                try:
+                    bias_vec = np.asarray(params["classifier"]["bias"], dtype=np.float64)
+                except (KeyError, TypeError):
+                    bias_vec = None
+                hp_raw = collect_hyperplane_epoch(
+                    pre_classifier=pre_classifier,
+                    targets=labels,
+                    weight_matrix=weight_matrix,
+                    bias=bias_vec,
+                    num_classes=num_classes,
+                )
+                append_hyperplane_csv_row(
+                    csv_path=hp_csv_path,
+                    epoch=epoch,
+                    global_step=global_step,
+                    raw=hp_raw,
+                    num_classes=num_classes,
+                )
 
             if (not tpt_reached) and bool(train_metrics.get("zero_training_error", False)):
                 tpt_reached = True
@@ -1307,9 +1351,16 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
                 class_pairs=nc_class_pairs,
                 tpt_step=tpt_step if tpt_reached else -1,
             )
+    if enable_hp_metrics:
+        finalize_hyperplane_plots(
+            csv_path=hp_csv_path,
+            output_path=hp_figure_path,
+            num_classes=num_classes,
+            tpt_step=tpt_step if tpt_reached else -1,
+        )
 
     boundary_figure_path: Path | None = None
-    if dataset_key in {"spiral", "gaussian_blobs", "bimodal", "rings", "checkerboard", "random_checkerboard"}:
+    if dataset_key in {"spiral", "gaussian_blobs", "bimodal", "rings", "checkerboard", "random_checkerboard", "dartboard"}:
         boundary_figure_path = run_dir / f"{dataset_key}_decision_boundaries.png"
         plot_2d_decision_boundaries(
             model=model,
@@ -1358,6 +1409,8 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
         "pca_projected_path": str(pca_projected_path) if pca_projected_path is not None else None,
         "geo_csv_path": str(geo_csv_path) if geo_csv_path is not None else None,
         "geo_figure_path": str(geo_figure_path) if geo_figure_path is not None else None,
+        "hp_csv_path":    str(hp_csv_path)    if hp_csv_path    is not None else None,
+        "hp_figure_path": str(hp_figure_path) if hp_figure_path is not None else None,
         "distribution_figure_path": str(distribution_figure_path),
         "decision_boundary_path": str(boundary_figure_path) if boundary_figure_path is not None else None,
         "final_train_loss": float(last_train_metrics["loss"]),

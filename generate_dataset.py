@@ -154,6 +154,46 @@ def _validate_checkerboard_config(data_cfg: dict) -> None:
             "point squares would overlap between adjacent cells. "
             "Reduce noise_std or increase grid_size."
         )
+    
+def _validate_dartboard_config(data_cfg: dict) -> None:
+    num_classes      = int(data_cfg.get("num_classes",    2))
+    num_rings        = int(data_cfg.get("num_rings",      4))
+    num_sectors      = int(data_cfg.get("num_sectors",    8))
+    points_per_class = int(data_cfg.get("points_per_class", 1000))
+    noise_std        = float(data_cfg.get("noise_std",    0.0))
+    inner_radius     = float(data_cfg.get("inner_radius", 0.05))
+    outer_radius     = float(data_cfg.get("outer_radius", 1.0))
+ 
+    if num_classes < 2:
+        raise ValueError("dartboard: num_classes must be >= 2.")
+    if num_rings < 1:
+        raise ValueError("dartboard: num_rings must be >= 1.")
+    if num_sectors < 2:
+        raise ValueError("dartboard: num_sectors must be >= 2.")
+    if num_rings * num_sectors < num_classes:
+        raise ValueError(
+            f"dartboard: num_rings * num_sectors ({num_rings * num_sectors}) "
+            f"must be >= num_classes ({num_classes})."
+        )
+    if points_per_class <= 0:
+        raise ValueError("dartboard: points_per_class must be > 0.")
+    if noise_std < 0:
+        raise ValueError("dartboard: noise_std must be >= 0.")
+    if inner_radius < 0 or inner_radius >= outer_radius:
+        raise ValueError(
+            "dartboard: inner_radius must satisfy 0 <= inner_radius < outer_radius."
+        )
+    if outer_radius <= 0:
+        raise ValueError("dartboard: outer_radius must be > 0.")
+ 
+    ring_width    = (outer_radius - inner_radius) / num_rings
+    min_arc_width = outer_radius * (2.0 * np.pi / num_sectors)
+    if noise_std > min(ring_width, min_arc_width) / 2.0:
+        raise ValueError(
+            f"dartboard: noise_std={noise_std:.4f} may cause cells to overlap "
+            f"(ring_width={ring_width:.4f}, min_arc_width={min_arc_width:.4f}). "
+            "Reduce noise_std or increase num_rings/num_sectors."
+        )
 
 
 def build_class_index_map(labels: np.ndarray, num_classes: int) -> Dict[int, np.ndarray]:
@@ -395,6 +435,85 @@ def generate_random_checkerboard(
         grid_size=grid_size,
         random_tile_classes=True,
     )
+
+def generate_dartboard(
+    points_per_class: int,
+    num_classes:      int,
+    random_seed:      int,
+    num_rings:        int   = 4,
+    num_sectors:      int   = 8,
+    noise_std:        float = 0.0,
+    inner_radius:     float = 0.05,
+    outer_radius:     float = 1.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Dartboard dataset.
+ 
+    The plane is divided into (num_rings × num_sectors) cells.  Cell (ri, si)
+    is assigned class  (ri + si) % num_classes,  so the label alternates both
+    radially and angularly — the polar analogue of the XOR checkerboard.
+ 
+    Points are sampled with uniform area density inside each cell (uniform in
+    r², uniform in angle), then optionally perturbed by isotropic Gaussian
+    noise in (x, y) space.
+ 
+    Returns
+    -------
+    x : float32 array, shape (num_classes * points_per_class, 2)
+    y : int64   array, shape (num_classes * points_per_class,)
+    """
+    rng = np.random.default_rng(random_seed)
+ 
+    ring_edges   = np.linspace(inner_radius, outer_radius, num_rings   + 1)
+    sector_edges = np.linspace(0.0, 2.0 * np.pi,           num_sectors + 1)
+ 
+    # Group cells by class.
+    cells_per_class: list[list[tuple[int, int]]] = [[] for _ in range(num_classes)]
+    for ri in range(num_rings):
+        for si in range(num_sectors):
+            cells_per_class[(ri + si) % num_classes].append((ri, si))
+ 
+    for class_id, cells in enumerate(cells_per_class):
+        if not cells:
+            raise ValueError(
+                f"dartboard: class {class_id} has no cells. "
+                "Increase num_rings or num_sectors relative to num_classes."
+            )
+ 
+    x_parts: list[np.ndarray] = []
+    y_parts: list[np.ndarray] = []
+ 
+    for class_id in range(num_classes):
+        cells     = cells_per_class[class_id]
+        n_cells   = len(cells)
+        pts_per_cell = points_per_class // n_cells
+        remainder    = points_per_class - pts_per_cell * n_cells
+ 
+        all_pts: list[np.ndarray] = []
+        for k, (ri, si) in enumerate(cells):
+            n = pts_per_cell + (1 if k < remainder else 0)
+            if n <= 0:
+                continue
+ 
+            r_lo, r_hi = float(ring_edges[ri]),    float(ring_edges[ri + 1])
+            a_lo, a_hi = float(sector_edges[si]),  float(sector_edges[si + 1])
+ 
+            # Uniform area sampling: uniform in r² gives uniform area.
+            r2 = rng.uniform(r_lo ** 2, r_hi ** 2, size=n)
+            r  = np.sqrt(r2).astype(np.float32)
+            a  = rng.uniform(a_lo, a_hi, size=n).astype(np.float32)
+ 
+            pts = np.stack([r * np.cos(a), r * np.sin(a)], axis=1)
+ 
+            if noise_std > 0.0:
+                pts += rng.normal(0.0, noise_std, size=pts.shape).astype(np.float32)
+ 
+            all_pts.append(pts)
+ 
+        x_parts.append(np.vstack(all_pts))
+        y_parts.append(np.full(points_per_class, class_id, dtype=np.int64))
+ 
+    return np.vstack(x_parts), np.concatenate(y_parts)
 
 
 def save_mnist_visualizations(
@@ -893,6 +1012,57 @@ def _load_random_checkerboard_bundle(data_cfg: dict, output_dir: Path) -> Datase
     )
 
 
+def _load_dartboard_bundle(data_cfg: dict, output_dir: Path) -> "DatasetBundle":
+    from generate_dataset import (
+        DatasetBundle,
+        build_class_index_map,
+        _save_2d_dataset_visualizations,
+    )
+ 
+    _validate_dartboard_config(data_cfg)
+ 
+    num_classes      = int(data_cfg.get("num_classes",    2))
+    points_per_class = int(data_cfg.get("points_per_class", 1000))
+    random_seed      = int(data_cfg.get("random_seed",    0))
+ 
+    shared_kwargs = dict(
+        num_classes      = num_classes,
+        num_rings        = int(data_cfg.get("num_rings",      4)),
+        num_sectors      = int(data_cfg.get("num_sectors",    8)),
+        noise_std        = float(data_cfg.get("noise_std",    0.0)),
+        inner_radius     = float(data_cfg.get("inner_radius", 0.05)),
+        outer_radius     = float(data_cfg.get("outer_radius", 1.0)),
+        points_per_class = points_per_class,
+    )
+ 
+    x_train, y_train = generate_dartboard(random_seed=random_seed,     **shared_kwargs)
+    x_test,  y_test  = generate_dartboard(random_seed=random_seed + 1, **shared_kwargs)
+ 
+    _save_2d_dataset_visualizations(
+        x_train=x_train, y_train=y_train,
+        x_test=x_test,   y_test=y_test,
+        num_classes=num_classes,
+        out_dir=output_dir,
+        title_prefix="Dartboard",
+        output_name="dartboard_dataset_samples.png",
+    )
+ 
+    x_train_arr = np.asarray(x_train, dtype=np.float32)
+    x_test_arr  = np.asarray(x_test,  dtype=np.float32)
+    y_train_arr = np.asarray(y_train, dtype=np.int64)
+    y_test_arr  = np.asarray(y_test,  dtype=np.int64)
+ 
+    return DatasetBundle(
+        train_inputs     = x_train_arr,
+        train_targets    = y_train_arr,
+        test_inputs      = x_test_arr,
+        test_targets     = y_test_arr,
+        class_to_indices = build_class_index_map(y_train_arr, num_classes),
+        num_classes      = num_classes,
+        input_shape      = (2,),
+    )
+
+
 def build_dataset_bundle(config: dict, output_dir: Path) -> DatasetBundle:
     data_cfg = config.get("data", {})
     dataset_name = str(data_cfg.get("dataset_name", "spiral")).strip().lower()
@@ -910,7 +1080,9 @@ def build_dataset_bundle(config: dict, output_dir: Path) -> DatasetBundle:
         return _load_checkerboard_bundle(data_cfg, output_dir)
     if dataset_name == "random_checkerboard":
         return _load_random_checkerboard_bundle(data_cfg, output_dir)
+    if dataset_name == "dartboard":
+        return _load_dartboard_bundle(data_cfg, output_dir)
     raise ValueError(
         "Unsupported dataset_name "
-        f"'{dataset_name}'. Expected 'mnist', 'spiral', 'gaussian_blobs', 'bimodal', 'rings', 'checkerboard', or 'random_checkerboard'."
+        f"'{dataset_name}'. Expected 'mnist', 'spiral', 'gaussian_blobs', 'bimodal', 'rings', 'checkerboard', 'random_checkerboard', or 'dartboard'."
     )
