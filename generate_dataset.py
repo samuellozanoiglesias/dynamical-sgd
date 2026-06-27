@@ -112,7 +112,7 @@ def _validate_rings_config(data_cfg: dict) -> None:
         )
 
 
-def _validate_bimodal_config(data_cfg: dict) -> None:
+def _validate_blobs_config(data_cfg: dict) -> None:
     num_classes = int(data_cfg.get("num_classes", 3))
     points_per_class = int(data_cfg.get("points_per_class", 1000))
     noise_std = float(data_cfg.get("noise_std", 0.15))
@@ -120,15 +120,15 @@ def _validate_bimodal_config(data_cfg: dict) -> None:
     class_separation = float(data_cfg.get("class_separation", 120.0))
 
     if num_classes < 2:
-        raise ValueError("For bimodal data, data.num_classes must be >= 2.")
+        raise ValueError("For blobs data, data.num_classes must be >= 2.")
     if points_per_class <= 0:
-        raise ValueError("For bimodal data, data.points_per_class must be > 0.")
+        raise ValueError("For blobs data, data.points_per_class must be > 0.")
     if noise_std < 0:
-        raise ValueError("For bimodal data, data.noise_std must be >= 0.")
+        raise ValueError("For blobs data, data.noise_std must be >= 0.")
     if center_radius <= 0:
-        raise ValueError("For bimodal data, data.center_radius must be > 0.")
+        raise ValueError("For blobs data, data.center_radius must be > 0.")
     if not (0.0 < class_separation <= 360.0):
-        raise ValueError("For bimodal data, data.class_separation must be in (0, 360] degrees.")
+        raise ValueError("For blobs data, data.class_separation must be in (0, 360] degrees.")
 
 
 def _validate_checkerboard_config(data_cfg: dict) -> None:
@@ -304,27 +304,28 @@ def generate_rings(
     return np.vstack(x_parts), np.concatenate(y_parts)
 
 
-def generate_bimodal_classes(
+import numpy as np
+
+def generate_blobs_classes(
     points_per_class: int,
     num_classes: int,
-    class_separation: float,
+    class_separation: float,  # Retained for signature compatibility
     noise_std: float,
     random_seed: int,
     center_radius: float = 0.7,
     num_modes: int = 3,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Each class has num_modes blob pairs (2*num_modes blobs total).
-    Blobs are placed at angles k * (360 / (num_classes * num_modes)) + class_id * class_separation,
-    alternating classes around the circle, at distance center_radius from origin.
-    class_separation is the angular offset between classes in degrees.
+    Each class has exactly num_modes blobs (supports both odd and even numbers).
+    Blobs are distributed evenly around a circle and interleaved by class.
     """
     rng = np.random.default_rng(random_seed)
 
-    total_blobs_per_class = 2 * num_modes
-    pts_per_blob = points_per_class // total_blobs_per_class
-    remainder = points_per_class - pts_per_blob * total_blobs_per_class
+    # num_modes is now the total number of blobs per class
+    pts_per_blob = points_per_class // num_modes
+    remainder = points_per_class - pts_per_blob * num_modes
 
+    # Total slots around the circle across all classes combined
     angular_step = 360.0 / (num_classes * num_modes)
 
     x_parts: list[np.ndarray] = []
@@ -332,22 +333,23 @@ def generate_bimodal_classes(
 
     for class_id in range(num_classes):
         all_pts: list[np.ndarray] = []
-        blob_count = 0
         for mode_idx in range(num_modes):
-            # two antipodal blobs per mode, rotated to interleave with other classes
-            base_angle = (class_id + mode_idx * num_classes) * angular_step
-            for sign in (1.0, -1.0):
-                angle = np.deg2rad(base_angle + (0.0 if sign > 0 else 180.0))
-                center = np.array([np.cos(angle), np.sin(angle)]) * float(center_radius)
-                n = pts_per_blob + (1 if blob_count < remainder else 0)
-                blob_count += 1
-                pts = rng.normal(center, float(noise_std), size=(n, 2))
-                all_pts.append(pts.astype(np.float32))
+            # Interleave classes perfectly (e.g., Class 0 @ slot 0, Class 1 @ slot 1...)
+            angle_deg = (class_id + mode_idx * num_classes) * angular_step
+            angle_rad = np.deg2rad(angle_deg)
+            
+            center = np.array([np.cos(angle_rad), np.sin(angle_rad)]) * float(center_radius)
+            
+            # Distribute remainder points cleanly across the loops
+            n = pts_per_blob + (1 if mode_idx < remainder else 0)
+            
+            pts = rng.normal(center, float(noise_std), size=(n, 2))
+            all_pts.append(pts.astype(np.float32))
+            
         x_parts.append(np.vstack(all_pts))
         y_parts.append(np.full(points_per_class, class_id, dtype=np.int64))
 
     return np.vstack(x_parts), np.concatenate(y_parts)
-
 
 def generate_checkerboard(
     points_per_class: int,
@@ -858,13 +860,13 @@ def _load_rings_bundle(data_cfg: dict, output_dir: Path) -> DatasetBundle:
     )
 
 
-def _load_bimodal_bundle(data_cfg: dict, output_dir: Path) -> DatasetBundle:
-    _validate_bimodal_config(data_cfg)
+def _load_blobs_bundle(data_cfg: dict, output_dir: Path) -> DatasetBundle:
+    _validate_blobs_config(data_cfg)
     num_classes = int(data_cfg.get("num_classes", 4))
     points_per_class = int(data_cfg.get("points_per_class", 1000))
     random_seed = int(data_cfg.get("random_seed", 0))
 
-    x_train, y_train = generate_bimodal_classes(
+    x_train, y_train = generate_blobs_classes(
         points_per_class=points_per_class,
         num_classes=num_classes,
         class_separation=float(data_cfg.get("class_separation", 1.5)),
@@ -873,7 +875,7 @@ def _load_bimodal_bundle(data_cfg: dict, output_dir: Path) -> DatasetBundle:
         center_radius=float(data_cfg.get("center_radius", 2.5)),
         num_modes=int(data_cfg.get("num_modes", 3)),
     )
-    x_test, y_test = generate_bimodal_classes(
+    x_test, y_test = generate_blobs_classes(
         points_per_class=points_per_class,
         num_classes=num_classes,
         class_separation=float(data_cfg.get("class_separation", 1.5)),
@@ -890,8 +892,8 @@ def _load_bimodal_bundle(data_cfg: dict, output_dir: Path) -> DatasetBundle:
         y_test=y_test,
         num_classes=num_classes,
         out_dir=output_dir,
-        title_prefix="Bimodal Classes",
-        output_name="bimodal_dataset_samples.png",
+        title_prefix="blobs Classes",
+        output_name="blobs_dataset_samples.png",
     )
 
     x_train_arr = np.asarray(x_train, dtype=np.float32)
@@ -1072,8 +1074,8 @@ def build_dataset_bundle(config: dict, output_dir: Path) -> DatasetBundle:
         return _load_spiral_bundle(data_cfg, output_dir)
     if dataset_name == "gaussian_blobs":
         return _load_gaussian_blobs_bundle(data_cfg, output_dir)
-    if dataset_name == "bimodal":
-        return _load_bimodal_bundle(data_cfg, output_dir)
+    if dataset_name == "blobs":
+        return _load_blobs_bundle(data_cfg, output_dir)
     if dataset_name == "rings":
         return _load_rings_bundle(data_cfg, output_dir)
     if dataset_name == "checkerboard":
@@ -1084,5 +1086,5 @@ def build_dataset_bundle(config: dict, output_dir: Path) -> DatasetBundle:
         return _load_dartboard_bundle(data_cfg, output_dir)
     raise ValueError(
         "Unsupported dataset_name "
-        f"'{dataset_name}'. Expected 'mnist', 'spiral', 'gaussian_blobs', 'bimodal', 'rings', 'checkerboard', 'random_checkerboard', or 'dartboard'."
+        f"'{dataset_name}'. Expected 'mnist', 'spiral', 'gaussian_blobs', 'blobs', 'rings', 'checkerboard', 'random_checkerboard', or 'dartboard'."
     )

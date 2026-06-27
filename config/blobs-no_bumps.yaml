@@ -1,14 +1,14 @@
 use_gpu: false
 
 data:
-  dataset_name: rings
+  dataset_name: blobs
   data_dir: ./data
   num_classes: 3
   points_per_class: 100
   noise_std: 0.05
-  class_separation: 0.15
-  center_radius: 0.1
-  num_rings: 2
+  class_separation: 120
+  center_radius: 0.6
+  num_modes: 5
   random_seed: 0
 model:
   architecture: mlp_relu
@@ -32,8 +32,8 @@ optimizer:
   momentum: 0.9
   optimizer_type: adam
 dynamics:
-  bumps_before_TPT: true
-  bumps_at_TPT: true
+  bumps_before_TPT: false
+  bumps_at_TPT: false
   period_length: 5000
   w_max: 70.0
   amplitude: 1.0

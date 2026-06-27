@@ -62,6 +62,14 @@ from hyperplanes import (
     finalize_hyperplane_plots,
     initialize_hyperplane_csv,
 )
+
+from projection_PCA_analysis import (
+        append_proj_nc_csv_row,
+        collect_proj_nc_epoch,
+        finalize_proj_nc_plots,
+        initialize_proj_nc_csv,
+    )
+
 from model import JAXModel, ParamTree, build_model
 
 
@@ -917,13 +925,14 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
     enable_nc_metrics = _analysis_output_enabled(analysis_cfg, ("nc_metrics",))
     enable_sep_metrics = _analysis_output_enabled(analysis_cfg, ("separability_metrics",))
     enable_pca_analysis = _analysis_output_enabled(analysis_cfg, ("pca_analysis",))
-    enable_geo_metrics = _analysis_output_enabled(
-        analysis_cfg,
-        ("PCA_geometric", "pca_geometric", "pca_geometric_overlapping"),
-    )
+    enable_geo_metrics = _analysis_output_enabled(analysis_cfg, ("PCA_geometric", "pca_geometric", "pca_geometric_overlapping"),)
+    enable_hp_metrics = _analysis_output_enabled(analysis_cfg, ("hyperplane_metrics", "hyperplanes"))
+    enable_proj_nc = _analysis_output_enabled(analysis_cfg, ("proj_nc_analysis",))
+    
     collect_pre_classifier = (
         enable_classifier_metrics or enable_pca_analysis
         or enable_geo_metrics or enable_hp_metrics
+        or enable_proj_nc
     )
 
     nc_class_pairs = build_nc_class_pairs(num_classes)
@@ -989,15 +998,23 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
             class_pairs=nc_class_pairs,
         )
     
-    enable_hp_metrics = _analysis_output_enabled(
-    analysis_cfg, ("hyperplane_metrics", "hyperplanes")
-    )
     hp_csv_path: Path | None = None
     hp_figure_path: Path | None = None
     if enable_hp_metrics:
         hp_csv_path  = run_dir / "hyperplanes.csv"
         hp_figure_path = run_dir / "hyperplanes.png"
         initialize_hyperplane_csv(csv_path=hp_csv_path, num_classes=num_classes)
+
+    proj_nc_csv_path: Path | None = None
+    proj_nc_figure_path: Path | None = None
+    if enable_proj_nc:
+        proj_nc_csv_path = run_dir / "proj_nc_metrics.csv"
+        proj_nc_figure_path = run_dir / "proj_nc_metrics.png"
+        initialize_proj_nc_csv(
+            csv_path=proj_nc_csv_path,
+            num_classes=num_classes,
+            class_pairs=nc_class_pairs,
+        )
 
     predict_step = jax.jit(lambda step_params, batch_x: model.apply(step_params, batch_x))
 
@@ -1219,6 +1236,26 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
                     raw=geo_raw,
                     num_classes=num_classes,
                 )
+
+            if enable_proj_nc:
+                if pre_classifier is None or labels is None:
+                    raise RuntimeError(
+                        "proj_nc analysis enabled but no pre-classifier outputs were collected."
+                    )
+                proj_raw = collect_proj_nc_epoch(
+                    pre_classifier=pre_classifier,
+                    targets=labels,
+                    num_classes=num_classes,
+                    class_pairs=nc_class_pairs,
+                )
+                append_proj_nc_csv_row(
+                    csv_path=proj_nc_csv_path,
+                    epoch=epoch,
+                    global_step=global_step,
+                    raw=proj_raw,
+                    num_classes=num_classes,
+                    class_pairs=nc_class_pairs,
+                )
             
             if enable_hp_metrics:
                 if pre_classifier is None or labels is None:
@@ -1358,9 +1395,17 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
             num_classes=num_classes,
             tpt_step=tpt_step if tpt_reached else -1,
         )
+    if enable_proj_nc:
+        finalize_proj_nc_plots(
+            csv_path=proj_nc_csv_path,
+            output_path=proj_nc_figure_path,
+            num_classes=num_classes,
+            class_pairs=nc_class_pairs,
+            tpt_step=tpt_step if tpt_reached else -1,
+        )
 
     boundary_figure_path: Path | None = None
-    if dataset_key in {"spiral", "gaussian_blobs", "bimodal", "rings", "checkerboard", "random_checkerboard", "dartboard"}:
+    if dataset_key in {"spiral", "gaussian_blobs", "blobs", "rings", "checkerboard", "random_checkerboard", "dartboard"}:
         boundary_figure_path = run_dir / f"{dataset_key}_decision_boundaries.png"
         plot_2d_decision_boundaries(
             model=model,
