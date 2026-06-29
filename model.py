@@ -251,7 +251,9 @@ class JAXModel:
             if len(self.input_shape) == 3:
                 in_channels = int(self.input_shape[0])
                 key, stem_key = jax.random.split(key)
-                stem = {"conv": _conv_init(stem_key, in_channels, base_width, 7, self.init_type)}
+                # Small-dataset variant (He et al. 2015 / reference paper):
+                # 3×3 conv, stride 1, no max-pool — suited for 32×32 inputs.
+                stem = {"conv": _conv_init(stem_key, in_channels, base_width, 3, self.init_type)}
 
                 prev_channels = base_width
                 for stage_idx, num_blocks in enumerate(self.resnet_block_counts):
@@ -386,17 +388,18 @@ class JAXModel:
                     )
                 x_arr = jnp.transpose(x_arr, (0, 2, 3, 1))
                 stem_conv = hidden_layers["stem"]["conv"]
+                # Small-dataset variant: stride-1 3×3 conv, no pooling after stem.
                 z = _conv2d(
                     x_arr,
                     stem_conv["kernel"],
                     stem_conv["bias"] if self.use_bias else None,
-                    stride=2,
+                    stride=1,
                     padding="SAME",
                 )
                 first_linear_pre = z
                 h = jax.nn.relu(z)
                 first_activation_post = h
-                h = _avg_pool2d(h, window_size=3, stride=2)
+                # No max-pool / avg-pool here (matches reference: maxpool = Identity)
 
                 for stage_idx, stage_blocks in enumerate(stages):
                     for block_idx, block in enumerate(stage_blocks):

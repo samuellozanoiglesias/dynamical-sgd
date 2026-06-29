@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import gzip
@@ -686,6 +685,13 @@ def _load_mnist_bundle(data_cfg: dict, output_dir: Path) -> DatasetBundle:
     x_test = test_images.astype(np.float32)[:, None, :, :] / 255.0
     x_train = (x_train - 0.1307) / 0.3081
     x_test = (x_test - 0.1307) / 0.3081
+
+    # Pad 28×28 → 32×32 with 2-pixel zero border on each side, matching the
+    # reference training code: transforms.Pad((padded_im_size - im_size) // 2)
+    # i.e. transforms.Pad(2).  Shape goes (N,1,28,28) → (N,1,32,32).
+    pad = 2
+    x_train = np.pad(x_train, ((0, 0), (0, 0), (pad, pad), (pad, pad)), mode="constant")
+    x_test  = np.pad(x_test,  ((0, 0), (0, 0), (pad, pad), (pad, pad)), mode="constant")
 
     y_train = train_labels.astype(np.int64)
     y_test = test_labels.astype(np.int64)

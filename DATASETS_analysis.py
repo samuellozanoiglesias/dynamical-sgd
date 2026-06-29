@@ -50,8 +50,8 @@ Five PNGs are written to OUTPUT_DIR (one line per dataset in every panel):
 
 Usage
 -----
-    nohup python DATASETS_analysis.py --training_type without_bumps > log.out 2>&1 &
-    python DATASETS_analysis.py --output ./plots --smooth 25
+
+nohup python DATASETS_analysis.py --training_type without_bumps > log.out 2>&1 &
 
 Column-mapping assumptions are identical to plot_num_modes.py -- see that
 script's docstring / the comments below if you need to tweak a mapping
@@ -706,6 +706,32 @@ def plot_projected_nc(groups, output_dir, color_map, smooth_window):
     print(f"Saved {path}")
 
 
+def plot_NN_comparison(groups, output_dir, color_map, smooth_window):
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+ 
+    # Subplot 1: Bhattacharyya distance
+    plot_single_metric(axes[0], groups, "pca_geom", lambda df: mean_over_pairs(df, "ellipsoid_bhattacharyya"),
+                        "Mean Bhattacharyya distance", "Mean ellipsoid Bhattacharyya distance (over class pairs)",
+                        color_map, smooth_window)
+    axes[0].set_yscale('log') # Log Y axis for Bhattacharyya distance
+    axes[0].set_ylim(0.99, 80) # Fixed limits for Bhattacharyya distance
+ 
+    # Subplot 2: Path curvature ratio
+    plot_single_metric(axes[1], groups, "classifier", lambda df: df["path_curvature_ratio"],
+                        "Path curvature ratio", "Path curvature ratio", color_map, smooth_window)
+    axes[1].set_yscale('log') # Log Y axis for Path curvature ratio
+    axes[1].set_ylim(0.99, 60) # Fixed limits for Path curvature ratio
+ 
+    fig.suptitle("Neural Network Comparison: Representation and Curvature Geometry", fontsize=14)
+    add_dataset_legend(fig, color_map)
+    fig.tight_layout(rect=[0, 0, 0.93, 0.95])
+ 
+    path = os.path.join(output_dir, "NN_comparison.png")
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    print(f"Saved {path}")
+
+
 # --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
@@ -761,6 +787,7 @@ def main():
     plot_neural_collapse(groups, output_dir, color_map, args.smooth)
     plot_high_dim_classification(groups, output_dir, color_map, args.smooth)
     plot_cylinder_hyperplanes(groups, output_dir, color_map, args.smooth)
+    plot_NN_comparison(groups, output_dir, color_map, args.smooth)
     plot_projected_nc(groups, output_dir, color_map, args.smooth)
  
     print("\nDone.")

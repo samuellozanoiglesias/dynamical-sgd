@@ -898,7 +898,65 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
     freeze_step_applied: int | None = None
     reinit_key = jax.random.PRNGKey(int(random_seed) + 1)
 
-    if optimizer_name == "adam":
+    # -----------------------------------------------------------------------
+    # CNN + MNIST MultiStep LR schedule (matches the reference training code)
+    # -----------------------------------------------------------------------
+    # When running resnet18 on MNIST with SGD, the reference uses:
+    #   lr=0.0679, momentum=0.9, weight_decay=5e-4, epochs=350,
+    #   MultiStepLR milestones=[350//3, 350*2//3], gamma=0.1
+    # We replicate this with optax.piecewise_constant_schedule.
+    # Steps-per-epoch = ceil(60000 / batch_size).  Milestone epochs are
+    # converted to global steps so the schedule works in the step-based loop.
+    # Override only if the user has NOT explicitly set learning_rate in config.
+    _architecture = str(model_cfg.get("architecture", "mlp")).strip().lower()
+    _is_cnn = (_architecture == "resnet18" and optimizer_name == "sgd")
+
+    if _is_cnn:
+        # Reference hyper-parameters (used as defaults; config values take precedence)
+        _ref_lr       = 0.0679
+        _ref_momentum = 0.9
+        _ref_wd       = 5e-4
+        _ref_epochs   = 350
+        _ref_milestones = [_ref_epochs // 3, _ref_epochs * 2 // 3]  # [116, 233]
+        _ref_gamma    = 0.1
+
+        # Only apply reference defaults for values not explicitly set in config
+        _user_set_lr  = ("learning_rate" in optimizer_cfg or "learning_rate" in training_cfg)
+        _user_set_mom = ("momentum"      in optimizer_cfg or "momentum"      in training_cfg)
+        _user_set_wd  = (
+            "weight_decay" in optimizer_cfg or "l2_reg" in optimizer_cfg
+            or "weight_decay" in training_cfg or "l2_reg" in training_cfg
+        )
+
+        if not _user_set_lr:
+            learning_rate = _ref_lr
+        if not _user_set_mom:
+            momentum = _ref_momentum
+        if not _user_set_wd:
+            weight_decay = _ref_wd
+
+        # Build MultiStep schedule: lr × 0.1 at each milestone (in steps)
+        _steps_per_epoch = math.ceil(dataset_bundle.train_inputs.shape[0] / batch_size)
+        _milestone_steps = [m * _steps_per_epoch for m in _ref_milestones]
+        # piecewise_constant_schedule needs boundaries and scale factors
+        _boundaries_and_scales: dict[int, float] = {s: _ref_gamma for s in _milestone_steps}
+        _lr_schedule = optax.piecewise_constant_schedule(
+            init_value=learning_rate,
+            boundaries_and_scales=_boundaries_and_scales,
+        )
+        _sgd_base = optax.sgd(
+            learning_rate=_lr_schedule,
+            momentum=momentum,
+            nesterov=nesterov,
+        )
+        print(
+            f"[{run_label}] CNN mode: SGD lr={learning_rate:.4f}, "
+            f"momentum={momentum}, weight_decay={weight_decay}, "
+            f"MultiStepLR milestones={_ref_milestones} epochs "
+            f"→ steps {_milestone_steps}, gamma={_ref_gamma}"
+        )
+        base_optimizer = _sgd_base
+    elif optimizer_name == "adam":
         base_optimizer = optax.adam(
             learning_rate=learning_rate,
             b1=beta1,
