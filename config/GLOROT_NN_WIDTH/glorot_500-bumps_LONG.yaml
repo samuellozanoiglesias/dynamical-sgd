@@ -47,11 +47,13 @@ dynamics:
 analysis:
   plot_version: simplified
   outputs:
-    classifier_metrics: true
+    classifier_metrics: false
     nc_metrics: false
     separability_metrics: false
     pca_analysis: false
-    pca_geometric: true
+    pca_geometric: false
+    hyperplane_metrics: false
+    proj_nc_analysis: true
   pca:
     projected_dims: [1, 2, 3, 5]
 output:
