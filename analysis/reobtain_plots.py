@@ -182,7 +182,7 @@ def _plot_reobtained_classifier_metrics(
 		)
 	ax.set_title("Logit Decomposition")
 	ax.set_ylabel("Logit")
-	ax.set_ylim(-5.0, 25.0)
+	ax.set_ylim(-13000.0, 25.0)
 	ax.grid(True, alpha=0.3)
 	if num_classes <= 6:
 		ax.legend(fontsize=7, ncol=2)

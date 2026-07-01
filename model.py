@@ -116,41 +116,6 @@ def _conv2d(
         y = y + bias[None, None, None, :]
     return y
 
-
-def _max_pool2d(x: jax.Array, window_size: int, stride: int) -> jax.Array:
-    init_val = jnp.array(-jnp.inf, dtype=x.dtype)
-    return jax.lax.reduce_window(
-        x,
-        init_val,
-        jax.lax.max,
-        window_dimensions=(1, int(window_size), int(window_size), 1),
-        window_strides=(1, int(stride), int(stride), 1),
-        padding="SAME",
-    )
-
-
-def _avg_pool2d(x: jax.Array, window_size: int, stride: int) -> jax.Array:
-    # Use depthwise conv for average pooling to keep reverse-mode autodiff stable.
-    if x.ndim != 4:
-        raise ValueError("avg_pool2d expects NHWC inputs with 4 dimensions.")
-    kh = int(window_size)
-    kw = int(window_size)
-    stride = int(stride)
-    in_channels = int(x.shape[-1])
-    if in_channels <= 0:
-        raise ValueError("avg_pool2d expects a positive channel dimension.")
-    scale = 1.0 / float(kh * kw)
-    kernel = jnp.full((kh, kw, 1, in_channels), scale, dtype=x.dtype)
-    return jax.lax.conv_general_dilated(
-        x,
-        kernel,
-        window_strides=(stride, stride),
-        padding="SAME",
-        dimension_numbers=("NHWC", "HWIO", "NHWC"),
-        feature_group_count=in_channels,
-    )
-
-
 def _global_avg_pool(x: jax.Array, *, data_format: str = "NCHW") -> jax.Array:
     if data_format.upper() == "NHWC":
         return jnp.mean(x, axis=(1, 2))
