@@ -27,7 +27,7 @@ optimizer:
 dynamics:
   bumps_before_tpt: false
   bumps_at_tpt: false
-  period_length: 5000
+  period_length: 100
   w_max: 70.0
   amplitude: 1.0
   bump_order:

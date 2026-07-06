@@ -17,6 +17,7 @@ import optax
 import torch
 from model_cnn import (
     build_cnn_model,
+    build_simple_cnn_model,
     make_optimizer_and_scheduler,
     make_criterion,
     train_epoch_cnn,
@@ -854,8 +855,8 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
         freeze_part = None
         freeze_after_steps = None
 
-    bumps_before_tpt = _as_bool(dynamics_cfg.get("bumps_before_TPT", False))
-    bumps_at_tpt = _as_bool(dynamics_cfg.get("bumps_at_TPT", False))
+    bumps_before_tpt = _as_bool(dynamics_cfg.get("bumps_before_tpt", False))
+    bumps_at_tpt = _as_bool(dynamics_cfg.get("bumps_at_tpt", False))
     bumps_after_freeze = _as_bool(dynamics_cfg.get("bumps_after_freeze", True))
     reinitialize_after_freeze = _as_bool(dynamics_cfg.get("reinitialize", True))
     period_length = int(dynamics_cfg.get("period_length", 250))
@@ -911,13 +912,52 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
                 rng=test_metric_rng,
             )
 
-    use_pytorch_cnn = str(model_cfg.get("architecture", "mlp")).strip().lower() == "resnet18_cnn"
+    architecture_str = str(model_cfg.get("architecture", "mlp")).strip().lower()
+    # "resnet18_cnn" kept for backward compatibility with existing configs;
+    # "cnn" is the new generic entry point that reads model.cnn.backbone.
+    use_pytorch_cnn = architecture_str in {"resnet18_cnn", "cnn"}
     if use_pytorch_cnn:
         torch_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        input_ch = int(dataset_bundle.input_shape[0])
-        torch_model, classifier, feature_capture = build_cnn_model(
-            num_classes=num_classes, input_ch=input_ch, device=torch_device,
-        )
+        cnn_cfg = model_cfg.get("cnn", {}) or {}
+        default_backbone = "resnet18" if architecture_str == "resnet18_cnn" else "simple_cnn"
+        backbone_name = str(cnn_cfg.get("backbone", default_backbone)).strip().lower()
+
+        # image datasets (e.g. mnist) have input_shape like (C, H, W); tabular
+        # datasets (spiral, blobs, rings, checkerboard, ...) have input_shape
+        # like (D,) -- a flat feature count with no spatial dims. Only the
+        # former can feed conv1 directly; the latter needs a stem that
+        # projects flat vectors into a small image-like tensor first.
+        is_tabular_input = len(dataset_bundle.input_shape) == 1
+        if is_tabular_input:
+            input_ch = int(cnn_cfg.get("stem_channels", 1))
+            input_dim = int(dataset_bundle.input_shape[0])
+        else:
+            input_ch = int(dataset_bundle.input_shape[0])
+            input_dim = None
+
+        if backbone_name == "resnet18":
+            torch_model, classifier, feature_capture = build_cnn_model(
+                num_classes=num_classes, input_ch=input_ch, device=torch_device,
+                input_dim=input_dim,
+                stem_spatial_size=int(cnn_cfg.get("stem_spatial_size", 8)),
+            )
+        elif backbone_name == "simple_cnn":
+            fc_hidden_dim_raw = cnn_cfg.get("fc_hidden_dim")
+            torch_model, classifier, feature_capture = build_simple_cnn_model(
+                num_classes=num_classes, input_ch=input_ch, device=torch_device,
+                channels=[int(c) for c in cnn_cfg.get("channels", [16, 32])],
+                kernel_size=int(cnn_cfg.get("kernel_size", 3)),
+                use_batchnorm=_as_bool(cnn_cfg.get("use_batchnorm", True)),
+                pool_every_block=_as_bool(cnn_cfg.get("pool_every_block", True)),
+                dropout=float(cnn_cfg.get("dropout", 0.0)),
+                fc_hidden_dim=(int(fc_hidden_dim_raw) if fc_hidden_dim_raw else None),
+                input_dim=input_dim,
+                stem_spatial_size=int(cnn_cfg.get("stem_spatial_size", 16)),
+            )
+        else:
+            raise ValueError(
+                f"Unknown model.cnn.backbone '{backbone_name}'. Expected 'resnet18' or 'simple_cnn'."
+            )
         initial_classifier_weight = (classifier.weight.detach().cpu().clone().numpy())
         model = TorchModelAdapter(torch_model, classifier, feature_capture, torch_device)
         params = None

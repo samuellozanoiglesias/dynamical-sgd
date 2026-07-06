@@ -109,8 +109,8 @@ def _as_bool(value: Any) -> bool:
 
 
 def _infer_experiment_name(dynamics_cfg: Dict[str, Any]) -> str:
-    bumps_before_tpt = _as_bool(dynamics_cfg.get("bumps_before_TPT", False))
-    bumps_at_tpt = _as_bool(dynamics_cfg.get("bumps_at_TPT", False))
+    bumps_before_tpt = _as_bool(dynamics_cfg.get("bumps_before_tpt", False))
+    bumps_at_tpt = _as_bool(dynamics_cfg.get("bumps_at_tpt", False))
 
     if bumps_before_tpt and bumps_at_tpt:
         return "with_bumps"

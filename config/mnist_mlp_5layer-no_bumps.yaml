@@ -6,14 +6,15 @@ data:
   num_classes: 10
   random_seed: 0
 model:
-  architecture: resnet18
+  architecture: mlp
   init_type: glorot
-  resnet_base_width: 16
+  nn_width: 200
+  num_hidden_layers: 5
   use_bias: true
 training:
-  training_steps: 150000
+  training_steps: 250000
   save_metrics_every_n_steps: 50
-  batch_size: 200
+  batch_size: 500
   random_seed: 42
   loss: cross_entropy
 optimizer:
@@ -22,11 +23,11 @@ optimizer:
   eps: 1.0e-08
   gradient_clipping: null
   l2_reg: 0.0
-  learning_rate: 0.0001
+  learning_rate: 0.01
   momentum: 0.9
   optimizer_type: adam
 dynamics:
-  bumps_before_TPT: true
+  bumps_before_TPT: false
   bumps_at_TPT: false
   period_length: 5000
   w_max: 70.0
@@ -44,6 +45,8 @@ analysis:
     separability_metrics: false
     pca_analysis: false
     pca_geometric: true
+    hyperplane_metrics: false
+    proj_nc_analysis: true
   pca:
     projected_dims: [1, 2, 3, 5]
 output:

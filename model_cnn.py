@@ -44,8 +44,56 @@ def _make_hook(capture: "_FeatureCapture"):
     return hook
 
 
-def build_cnn_model(num_classes: int, input_ch: int, device: torch.device):
-    """Unmodified from neuralcollapse_(1).py:
+class _TabularStem(nn.Module):
+    """Projects flat feature vectors (e.g. the 2D spiral/blobs/rings/checkerboard
+    datasets, shape (N, D)) into a small image-like tensor (N, C, H, W) so the
+    resnet's unmodified conv stack has something to convolve over. Not part of
+    neuralcollapse_(1).py -- MNIST there is already image-shaped and never
+    needed this. Only inserted when the dataset itself is not image-shaped.
+    """
+
+    def __init__(self, input_dim: int, out_channels: int, spatial_size: int):
+        super().__init__()
+        self.out_channels = out_channels
+        self.spatial_size = spatial_size
+        self.proj = nn.Linear(input_dim, out_channels * spatial_size * spatial_size)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.reshape(x.shape[0], -1)
+        x = self.proj(x)
+        return x.view(x.shape[0], self.out_channels, self.spatial_size, self.spatial_size)
+
+
+class _CNNWithStem(nn.Module):
+    """Wraps an optional `_TabularStem` in front of any backbone (resnet18 or
+    SimpleCNN) while keeping `.fc` addressable, so the forward-hook
+    registration and TorchModelAdapter (which reach into `model.fc` /
+    `classifier.weight`) need zero changes regardless of which backbone or
+    whether a stem is present."""
+
+    def __init__(self, backbone: nn.Module, stem: "_TabularStem | None" = None):
+        super().__init__()
+        self.stem = stem
+        self.backbone = backbone
+
+    @property
+    def fc(self) -> nn.Module:
+        return self.backbone.fc
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.stem is not None:
+            x = self.stem(x)
+        return self.backbone(x)
+
+
+def build_cnn_model(
+    num_classes: int,
+    input_ch: int,
+    device: torch.device,
+    input_dim: int | None = None,
+    stem_spatial_size: int = 8,
+):
+    """Unmodified core from neuralcollapse_(1).py:
 
         model = models.resnet18(pretrained=False, num_classes=C)
         model.conv1 = nn.Conv2d(input_ch, model.conv1.weight.shape[0], 3, 1, 1, bias=False)
@@ -53,11 +101,136 @@ def build_cnn_model(num_classes: int, input_ch: int, device: torch.device):
         model = model.to(device)
         classifier = model.fc
         classifier.register_forward_hook(hook)
+
+    Extension: when `input_dim` is given (i.e. the dataset is flat feature
+    vectors like spiral/blobs/rings/checkerboard rather than an image), a
+    `_TabularStem` is inserted in front of the (still-unmodified) resnet to
+    project (N, input_dim) -> (N, input_ch, stem_spatial_size, stem_spatial_size).
+    For image datasets (MNIST etc.), pass input_dim=None and behavior is
+    identical to before.
     """
-    model = models.resnet18(pretrained=False, num_classes=num_classes)
-    model.conv1 = nn.Conv2d(input_ch, model.conv1.weight.shape[0], 3, 1, 1, bias=False)
-    model.maxpool = nn.MaxPool2d(kernel_size=1, stride=1, padding=0)
-    model = model.to(device)
+    resnet = models.resnet18(pretrained=False, num_classes=num_classes)
+    resnet.conv1 = nn.Conv2d(input_ch, resnet.conv1.weight.shape[0], 3, 1, 1, bias=False)
+    resnet.maxpool = nn.MaxPool2d(kernel_size=1, stride=1, padding=0)
+
+    stem = None
+    if input_dim is not None:
+        stem = _TabularStem(input_dim=input_dim, out_channels=input_ch, spatial_size=stem_spatial_size)
+
+    model = _CNNWithStem(resnet, stem).to(device)  # `resnet` positionally fills `backbone`
+
+    capture = _FeatureCapture()
+    classifier = model.fc
+    classifier.register_forward_hook(_make_hook(capture))
+    return model, classifier, capture
+
+
+# ---------------------------------------------------------------------------
+# Configurable, much smaller CNN for simple synthetic datasets (spiral, blobs,
+# rings, checkerboard, dartboard, ...). resnet18 is heavily over-parameterized
+# and its 4 stride-2 downsampling stages are tuned for photographic images;
+# on tiny synthetic 2D data it tends to overfit or fail to learn interesting
+# structure. SimpleCNN exposes a handful of knobs (number/width of conv
+# blocks, kernel size, batchnorm, pooling, dropout, optional FC hidden layer)
+# so its capacity can be matched to the dataset from the config file, while
+# still exposing `.fc` so it plugs into the exact same TorchModelAdapter /
+# forward-hook / bump-sampling training loop as the resnet18 path.
+# ---------------------------------------------------------------------------
+
+class SimpleCNN(nn.Module):
+    """A small, configurable CNN. Stacks `len(channels)` conv blocks
+    (conv -> [batchnorm] -> relu -> [2x2 maxpool]), global-average-pools down
+    to a single spatial position, optionally passes through one FC hidden
+    layer + dropout, then a final linear classifier layer `self.fc` (kept
+    named `fc` so the rest of the pipeline treats it exactly like resnet18's
+    `.fc`)."""
+
+    def __init__(
+        self,
+        num_classes: int,
+        in_channels: int,
+        channels: list[int],
+        kernel_size: int = 3,
+        use_batchnorm: bool = True,
+        pool_every_block: bool = True,
+        dropout: float = 0.0,
+        fc_hidden_dim: int | None = None,
+    ):
+        super().__init__()
+        if not channels:
+            raise ValueError("SimpleCNN requires at least one entry in `channels`.")
+
+        layers: list[nn.Module] = []
+        prev_c = in_channels
+        for c in channels:
+            layers.append(
+                nn.Conv2d(prev_c, c, kernel_size, padding=kernel_size // 2, bias=not use_batchnorm)
+            )
+            if use_batchnorm:
+                layers.append(nn.BatchNorm2d(c))
+            layers.append(nn.ReLU(inplace=True))
+            if pool_every_block:
+                layers.append(nn.MaxPool2d(2))
+            prev_c = c
+        self.features = nn.Sequential(*layers)
+
+        # Adaptive pool: works regardless of stem_spatial_size or how many
+        # pool_every_block halvings happened, and never errors out even if
+        # the spatial size shrinks to 1x1 partway through.
+        self.global_pool = nn.AdaptiveAvgPool2d(1)
+
+        if fc_hidden_dim:
+            self.pre_fc = nn.Sequential(nn.Linear(prev_c, fc_hidden_dim), nn.ReLU(inplace=True))
+            classifier_in = fc_hidden_dim
+        else:
+            self.pre_fc = nn.Identity()
+            classifier_in = prev_c
+
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        self.fc = nn.Linear(classifier_in, num_classes)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.features(x)
+        x = self.global_pool(x).flatten(1)
+        x = self.pre_fc(x)
+        x = self.dropout(x)
+        return self.fc(x)
+
+
+def build_simple_cnn_model(
+    num_classes: int,
+    input_ch: int,
+    device: torch.device,
+    channels: list[int] | None = None,
+    kernel_size: int = 3,
+    use_batchnorm: bool = True,
+    pool_every_block: bool = True,
+    dropout: float = 0.0,
+    fc_hidden_dim: int | None = None,
+    input_dim: int | None = None,
+    stem_spatial_size: int = 16,
+):
+    """Builds a SimpleCNN (optionally behind a `_TabularStem` for flat-vector
+    datasets), and wires up the same forward-hook + `.fc` interface used by
+    build_cnn_model, so TorchModelAdapter and train_epoch_cnn need zero
+    changes to use either backbone."""
+    channels = channels or [16, 32]
+    backbone = SimpleCNN(
+        num_classes=num_classes,
+        in_channels=input_ch,
+        channels=channels,
+        kernel_size=kernel_size,
+        use_batchnorm=use_batchnorm,
+        pool_every_block=pool_every_block,
+        dropout=dropout,
+        fc_hidden_dim=fc_hidden_dim,
+    )
+
+    stem = None
+    if input_dim is not None:
+        stem = _TabularStem(input_dim=input_dim, out_channels=input_ch, spatial_size=stem_spatial_size)
+
+    model = _CNNWithStem(backbone, stem).to(device)
 
     capture = _FeatureCapture()
     classifier = model.fc

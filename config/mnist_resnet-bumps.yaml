@@ -1,15 +1,10 @@
 use_gpu: true
 
 data:
-  dataset_name: spiral
+  dataset_name: mnist
   data_dir: ./data
-  num_classes: 3
-  points_per_class: 100
-  revolutions: 4.0
-  noise_std: 0.2
-  min_radius: 0.01
+  num_classes: 10
   random_seed: 0
-  angular_offsets: null
 
 model:
   architecture: resnet18_cnn
@@ -30,7 +25,7 @@ optimizer:
   nesterov: false
 
 dynamics:
-  bumps_before_tpt: false
+  bumps_before_tpt: true
   bumps_at_tpt: false
   period_length: 100
   w_max: 70.0

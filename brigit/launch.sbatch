@@ -28,7 +28,7 @@ cd /mnt/lustre/home/samuloza/dynamical-sgd/
 
 echo "Starting training job..."
 python launch.py \
-    --config config/glorot_500-no_bumps_LONG.yaml \
+    --config config/mnist_mlp_5layer-always_bumps.yaml \
     --override use_gpu=true \
     --override data.data_dir=/mnt/lustre/home/samuloza/dynamical-sgd/data \
     --override output.output_dir=/mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd
