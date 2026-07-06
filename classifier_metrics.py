@@ -113,8 +113,8 @@ def collect_classifier_epoch(
 
 
 def collect_advanced_classifier_metrics(
-    params: dict,
-    initial_params: dict,
+    weight_matrix: dict,
+    initial_weight_matrix: dict,
     cumulative_weight_distance: float,
     logits: np.ndarray,
     targets: np.ndarray,
@@ -124,8 +124,8 @@ def collect_advanced_classifier_metrics(
     logits_arr = np.asarray(logits, dtype=np.float64)
     targets_arr = np.asarray(targets, dtype=np.int64)
 
-    weights = _extract_classifier_weight_matrix(params)
-    initial_weights = _extract_classifier_weight_matrix(initial_params)
+    weights = np.asarray(weight_matrix, dtype=np.float64)
+    initial_weights = np.asarray(initial_weight_matrix, dtype=np.float64)
     num_classes = int(weights.shape[0])
 
     correct_logit_mean = np.full(num_classes, np.nan, dtype=np.float64)

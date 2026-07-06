@@ -14,6 +14,16 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
+import torch
+from model_cnn import (
+    build_cnn_model,
+    make_optimizer_and_scheduler,
+    make_criterion,
+    train_epoch_cnn,
+    TorchModelAdapter,
+    _EpochShuffler,
+)
+
 from generate_dataset import DatasetBundle, build_dataset_bundle
 from classifier_metrics import (
     append_classifier_csv_row,
@@ -261,6 +271,9 @@ def _build_metric_subset(
 def _set_global_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def _devices_for(platform: str) -> list[jax.Device]:
@@ -864,117 +877,89 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
 
     metric_inputs = dataset_bundle.train_inputs
     metric_targets = dataset_bundle.train_targets
+    test_metric_inputs = dataset_bundle.test_inputs
+    test_metric_targets = dataset_bundle.test_targets
     metric_subset_size: int | None = None
     if dataset_key == "mnist":
         metric_subset_size = int(
             analysis_cfg.get("metric_subset_size", data_cfg.get("metric_subset_size", 5000))
         )
         metric_subset_size = max(metric_subset_size, num_classes)
-        metric_subset_size = min(metric_subset_size, dataset_bundle.train_inputs.shape[0])
-        if metric_subset_size < dataset_bundle.train_inputs.shape[0]:
+
+        train_subset_size = min(metric_subset_size, dataset_bundle.train_inputs.shape[0])
+        if train_subset_size < dataset_bundle.train_inputs.shape[0]:
             metric_rng = np.random.default_rng(random_seed + 101)
             metric_inputs, metric_targets, _ = _build_metric_subset(
                 inputs=dataset_bundle.train_inputs,
                 targets=dataset_bundle.train_targets,
                 class_to_indices=dataset_bundle.class_to_indices,
                 num_classes=num_classes,
-                subset_size=metric_subset_size,
+                subset_size=train_subset_size,
                 rng=metric_rng,
             )
 
-    built_model = build_model(
-        model_cfg=model_cfg,
-        input_shape=dataset_bundle.input_shape,
-        num_classes=num_classes,
-        random_seed=random_seed,
-    )
-    model = built_model.model
-    params = jax.device_put(built_model.params, device=device)
-    initial_params = params
-    cumulative_weight_distance = 0.0
-    prev_params = params
-    grad_mask = _build_grad_mask(params, None)
-    freeze_applied = False
-    freeze_step_applied: int | None = None
-    reinit_key = jax.random.PRNGKey(int(random_seed) + 1)
+        test_subset_size = min(metric_subset_size, dataset_bundle.test_inputs.shape[0])
+        if test_subset_size < dataset_bundle.test_inputs.shape[0]:
+            test_metric_rng = np.random.default_rng(random_seed + 202)
+            test_class_to_indices = _build_class_to_indices(dataset_bundle.test_targets, num_classes)
+            test_metric_inputs, test_metric_targets, _ = _build_metric_subset(
+                inputs=dataset_bundle.test_inputs,
+                targets=dataset_bundle.test_targets,
+                class_to_indices=test_class_to_indices,
+                num_classes=num_classes,
+                subset_size=test_subset_size,
+                rng=test_metric_rng,
+            )
 
-    # -----------------------------------------------------------------------
-    # CNN + MNIST MultiStep LR schedule (matches the reference training code)
-    # -----------------------------------------------------------------------
-    # When running resnet18 on MNIST with SGD, the reference uses:
-    #   lr=0.0679, momentum=0.9, weight_decay=5e-4, epochs=350,
-    #   MultiStepLR milestones=[350//3, 350*2//3], gamma=0.1
-    # We replicate this with optax.piecewise_constant_schedule.
-    # Steps-per-epoch = ceil(60000 / batch_size).  Milestone epochs are
-    # converted to global steps so the schedule works in the step-based loop.
-    # Override only if the user has NOT explicitly set learning_rate in config.
-    _architecture = str(model_cfg.get("architecture", "mlp")).strip().lower()
-    _is_cnn = (_architecture == "resnet18" and optimizer_name == "sgd")
-
-    if _is_cnn:
-        # Reference hyper-parameters (used as defaults; config values take precedence)
-        _ref_lr       = 0.0679
-        _ref_momentum = 0.9
-        _ref_wd       = 5e-4
-        _ref_epochs   = 350
-        _ref_milestones = [_ref_epochs // 3, _ref_epochs * 2 // 3]  # [116, 233]
-        _ref_gamma    = 0.1
-
-        # Only apply reference defaults for values not explicitly set in config
-        _user_set_lr  = ("learning_rate" in optimizer_cfg or "learning_rate" in training_cfg)
-        _user_set_mom = ("momentum"      in optimizer_cfg or "momentum"      in training_cfg)
-        _user_set_wd  = (
-            "weight_decay" in optimizer_cfg or "l2_reg" in optimizer_cfg
-            or "weight_decay" in training_cfg or "l2_reg" in training_cfg
+    use_pytorch_cnn = str(model_cfg.get("architecture", "mlp")).strip().lower() == "resnet18_cnn"
+    if use_pytorch_cnn:
+        torch_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        input_ch = int(dataset_bundle.input_shape[0])
+        torch_model, classifier, feature_capture = build_cnn_model(
+            num_classes=num_classes, input_ch=input_ch, device=torch_device,
         )
-
-        if not _user_set_lr:
-            learning_rate = _ref_lr
-        if not _user_set_mom:
-            momentum = _ref_momentum
-        if not _user_set_wd:
-            weight_decay = _ref_wd
-
-        # Build MultiStep schedule: lr × 0.1 at each milestone (in steps)
-        _steps_per_epoch = math.ceil(dataset_bundle.train_inputs.shape[0] / batch_size)
-        _milestone_steps = [m * _steps_per_epoch for m in _ref_milestones]
-        # piecewise_constant_schedule needs boundaries and scale factors
-        _boundaries_and_scales: dict[int, float] = {s: _ref_gamma for s in _milestone_steps}
-        _lr_schedule = optax.piecewise_constant_schedule(
-            init_value=learning_rate,
-            boundaries_and_scales=_boundaries_and_scales,
-        )
-        _sgd_base = optax.sgd(
-            learning_rate=_lr_schedule,
-            momentum=momentum,
-            nesterov=nesterov,
-        )
-        print(
-            f"[{run_label}] CNN mode: SGD lr={learning_rate:.4f}, "
-            f"momentum={momentum}, weight_decay={weight_decay}, "
-            f"MultiStepLR milestones={_ref_milestones} epochs "
-            f"→ steps {_milestone_steps}, gamma={_ref_gamma}"
-        )
-        base_optimizer = _sgd_base
-    elif optimizer_name == "adam":
-        base_optimizer = optax.adam(
-            learning_rate=learning_rate,
-            b1=beta1,
-            b2=beta2,
-            eps=eps,
-        )
+        initial_classifier_weight = (classifier.weight.detach().cpu().clone().numpy())
+        model = TorchModelAdapter(torch_model, classifier, feature_capture, torch_device)
+        params = None
+        initial_params = None
+        cumulative_weight_distance = 0.0
+        prev_params = None
+        grad_mask = None
+        freeze_applied = False
+        freeze_step_applied = None
+        reinit_key = None
     else:
-        base_optimizer = optax.sgd(
-            learning_rate=learning_rate,
-            momentum=momentum,
-            nesterov=nesterov,
+        built_model = build_model(
+            model_cfg=model_cfg, input_shape=dataset_bundle.input_shape,
+            num_classes=num_classes, random_seed=random_seed,
         )
+        model = built_model.model
+        params = jax.device_put(built_model.params, device=device)
+        initial_params = params
+        cumulative_weight_distance = 0.0
+        prev_params = params
+        grad_mask = _build_grad_mask(params, None)
+        freeze_applied = False
+        freeze_step_applied = None
+        reinit_key = jax.random.PRNGKey(int(random_seed) + 1)
 
-    if gradient_clipping is not None:
-        optimizer = optax.chain(optax.clip_by_global_norm(gradient_clipping), base_optimizer)
+    total_epochs = int(math.ceil(total_steps / save_metrics_every_n_steps))
+
+    if use_pytorch_cnn:
+        cnn_optimizer, cnn_scheduler = make_optimizer_and_scheduler(
+            torch_model, lr=learning_rate, momentum=momentum,
+            weight_decay=weight_decay, epochs=total_epochs,
+        )
+        criterion = make_criterion(training_cfg.get("loss_name", "CrossEntropyLoss"))
+        optimizer = None
+        opt_state = None
     else:
-        optimizer = base_optimizer
-    opt_state = optimizer.init(params)
+        if optimizer_name == "adam":
+            base_optimizer = optax.adam(learning_rate=learning_rate, b1=beta1, b2=beta2, eps=eps)
+        else:
+            base_optimizer = optax.sgd(learning_rate=learning_rate, momentum=momentum, nesterov=nesterov)
+        optimizer = optax.chain(optax.clip_by_global_norm(gradient_clipping), base_optimizer) if gradient_clipping is not None else base_optimizer
+        opt_state = optimizer.init(params)
 
     csv_path = run_dir / "training_metrics.csv"
     figure_path = run_dir / "training_report.png"
@@ -1074,14 +1059,25 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
             class_pairs=nc_class_pairs,
         )
 
-    predict_step = jax.jit(lambda step_params, batch_x: model.apply(step_params, batch_x))
+    if use_pytorch_cnn:
+        predict_step = lambda step_params, batch_x: model.apply(step_params, batch_x)
+    else:
+        predict_step = jax.jit(lambda step_params, batch_x: model.apply(step_params, batch_x))
 
-    total_epochs = int(math.ceil(total_steps / save_metrics_every_n_steps))
+    last_classifier_grads = None
     global_step = 0
     tpt_reached = False
     tpt_step = -1
     rng = np.random.default_rng(random_seed)
     class_distribution_history: list[np.ndarray] = []
+
+    cnn_shuffler = None
+    if use_pytorch_cnn:
+        cnn_shuffler = _EpochShuffler(
+            num_samples=dataset_bundle.train_inputs.shape[0],
+            batch_size=batch_size,
+            rng=rng,
+        )
 
     last_train_metrics: Dict[str, Any] = {
         "loss": np.nan,
@@ -1107,22 +1103,38 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
                 break
 
             bumps_enabled = bumps_at_tpt if tpt_reached else bumps_before_tpt
-            (
-                params,
-                opt_state,
-                _step_train_metrics,
-                global_step,
-                bump_state,
-                step_distributions,
-                cumulative_weight_distance,
-                prev_params,
-                last_classifier_grads,
-                initial_params,
-                freeze_applied,
-                grad_mask,
-                reinit_key,
-                freeze_step,
-            ) = train_epoch(
+
+            if use_pytorch_cnn:
+                cnn_result = train_epoch_cnn(
+                    model=torch_model,
+                    criterion=criterion,
+                    device=torch_device,
+                    num_classes=num_classes,
+                    train_inputs=dataset_bundle.train_inputs,
+                    train_targets=dataset_bundle.train_targets,
+                    class_to_indices=dataset_bundle.class_to_indices,
+                    batch_size=batch_size,
+                    optimizer=cnn_optimizer,
+                    global_step=global_step,
+                    steps_this_epoch=steps_this_epoch,
+                    total_steps=total_steps,
+                    bumps_enabled=bumps_enabled,
+                    period_length=period_length,
+                    w_max=w_max,
+                    bump_order=bump_order,
+                    rng=rng,
+                    shuffler=cnn_shuffler,
+                )
+                cnn_scheduler.step()
+                global_step = cnn_result["global_step"]
+                bump_state = cnn_result["bump_state"]
+                step_distributions = cnn_result["step_distributions"]
+                freeze_step = None
+
+            else:
+                (params, opt_state, _step_train_metrics, global_step, bump_state, step_distributions,
+                 cumulative_weight_distance, prev_params, last_classifier_grads, initial_params,
+                 freeze_applied, grad_mask, reinit_key, freeze_step) = train_epoch(
                 params=params,
                 opt_state=opt_state,
                 optimizer=optimizer,
@@ -1164,8 +1176,8 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
             train_metrics = evaluate_arrays(
                 params=params,
                 predict_step=predict_step,
-                inputs=dataset_bundle.train_inputs,
-                targets=dataset_bundle.train_targets,
+                inputs=metric_inputs,
+                targets=metric_targets,
                 batch_size=eval_batch_size,
                 device=device,
                 num_classes=num_classes,
@@ -1173,8 +1185,8 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
             test_metrics = evaluate_arrays(
                 params=params,
                 predict_step=predict_step,
-                inputs=dataset_bundle.test_inputs,
-                targets=dataset_bundle.test_targets,
+                inputs=test_metric_inputs,
+                targets=test_metric_targets,
                 batch_size=eval_batch_size,
                 device=device,
                 num_classes=num_classes,
@@ -1232,16 +1244,25 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
             if enable_classifier_metrics:
                 if pre_classifier is None or logits is None or labels is None:
                     raise RuntimeError("Classifier metrics enabled but no pre-classifier outputs were collected.")
-                weight_matrix = np.asarray(model.classifier_weight_matrix(params), dtype=np.float64)
+                
+                if use_pytorch_cnn:
+                    weight_matrix = (classifier.weight.detach().cpu().numpy().astype(np.float64))
+                    initial_weight_matrix = initial_classifier_weight
+                else:
+                    weight_matrix = np.asarray(model.classifier_weight_matrix(params), dtype=np.float64,)
+                    initial_weight_matrix = np.asarray(model.classifier_weight_matrix(initial_params), dtype=np.float64,)
+                
                 classifier_raw = collect_classifier_epoch(
                     pre_classifier=pre_classifier,
                     logits=logits,
                     targets=labels,
                     weight_matrix=weight_matrix,
                 )
+
+                
                 advanced_classifier_raw = collect_advanced_classifier_metrics(
-                    params=params,
-                    initial_params=initial_params,
+                    weight_matrix=weight_matrix,
+                    initial_weight_matrix=initial_weight_matrix,
                     cumulative_weight_distance=cumulative_weight_distance,
                     logits=logits,
                     targets=labels,

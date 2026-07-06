@@ -7,20 +7,17 @@ data:
   random_seed: 0
 
 model:
-  architecture: resnet18
-  init_type: glorot
-  resnet_base_width: 64
-  use_bias: true
+  architecture: resnet18_cnn
 
 training:
-  training_steps: 164150  # 350 epochs × ceil(60000/128) steps/epoch = 350 × 469
-  save_metrics_every_n_steps: 469  # 1 checkpoint per epoch (= steps_per_epoch)
+  training_steps: 7000          # 350 × 20
+  save_metrics_every_n_steps: 1  # 1 checkpoint per "epoch" (=20 steps), matches original epoch cadence
   batch_size: 128
   random_seed: 42
   loss: cross_entropy
 
 optimizer:
-  optimizer_type: sgd 
+  optimizer_type: sgd
   learning_rate: 0.0679
   momentum: 0.9
   weight_decay: 5.0e-4
@@ -28,8 +25,8 @@ optimizer:
   nesterov: false
 
 dynamics:
-  bumps_before_TPT: false
-  bumps_at_TPT: false
+  bumps_before_tpt: false
+  bumps_at_tpt: false
   period_length: 5000
   w_max: 70.0
   amplitude: 1.0
@@ -40,13 +37,13 @@ analysis:
   metric_subset_size: 5000
   plot_version: simplified
   outputs:
-    classifier_metrics: false
-    nc_metrics: false
+    classifier_metrics: true
+    nc_metrics: true
     separability_metrics: false
     pca_analysis: false
-    pca_geometric: false
+    pca_geometric: true
     hyperplane_metrics: false
-    proj_nc_analysis: false
+    proj_nc_analysis: true
   pca:
     projected_dims: [1, 2, 3, 5]
 
