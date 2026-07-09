@@ -28,7 +28,7 @@ cd /mnt/lustre/home/samuloza/dynamical-sgd/
 
 echo "Starting training job..."
 python launch.py \
-    --config config/mnist_mlp_3layer-no_bumps.yaml \
+    --config config/tiny_imagenet_mlp-no_bumps.yaml \
     --override use_gpu=true \
     --override data.data_dir=/mnt/lustre/home/samuloza/dynamical-sgd/data \
     --override output.output_dir=/mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd

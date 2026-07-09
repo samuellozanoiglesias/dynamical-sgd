@@ -1,0 +1,67 @@
+use_gpu: true
+
+data:
+  dataset_name: cifar100       # or cifar100, tiny_imagenet
+  data_dir: ./data
+  label_mode: fine            # cifar100 only: fine (100 classes) or coarse (20 superclasses)
+  num_classes: 100              # must match the dataset (10/100/20/200)
+
+model:
+  architecture: cnn        # new generic entry point ("resnet18_cnn" still works, unchanged)
+  cnn:
+    backbone: simple_cnn    # "simple_cnn" or "resnet18"
+
+    # --- simple_cnn options ---
+    channels: [8, 16]       # one conv block per entry; width = channel count
+    kernel_size: 3            # conv kernel size (padding = kernel_size // 2, same spatial size)
+    use_batchnorm: true       # BatchNorm2d after each conv
+    pool_every_block: true    # 2x2 maxpool after each block (halves spatial size each time)
+    dropout: 0.1              # dropout before the final classifier layer
+    fc_hidden_dim: 32       # optional FC hidden layer between pooled features and classifier
+
+    # --- shared by both backbones, only used for tabular datasets (spiral, blobs, rings, ...) ---
+    stem_spatial_size: 12     # tabular inputs get projected to (stem_channels, S, S) before conv
+    stem_channels: 1          # channels the stem projects into (simple_cnn only; resnet18 path keeps 1)
+
+training:
+  training_steps: 7000          # 350 × 20
+  save_metrics_every_n_steps: 1  # 1 checkpoint per "epoch" (=20 steps), matches original epoch cadence
+  batch_size: 128
+  random_seed: 42
+  loss: cross_entropy
+
+optimizer:
+  optimizer_type: sgd
+  learning_rate: 0.0679
+  momentum: 0.9
+  weight_decay: 5.0e-4
+  gradient_clipping: null
+  nesterov: false
+
+dynamics:
+  bumps_before_tpt: false
+  bumps_at_tpt: false
+  period_length: 100
+  w_max: 70.0
+  amplitude: 1.0
+  bump_order:
+  tpt_accuracy_threshold: 1.0
+
+analysis:
+  metric_subset_size: 5000
+  plot_version: simplified
+  compute_results: average
+  outputs:
+    classifier_metrics: false
+    nc_metrics: false
+    separability_metrics: false
+    pca_analysis: false
+    pca_geometric: false
+    hyperplane_metrics: false
+    proj_nc_analysis: false
+    multiclass_metrics: true
+  pca:
+    projected_dims: [1, 2, 3, 5]
+
+output:
+  output_dir: /data/samuel_lozano/dynamical-sgd

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import gzip
+import pickle
 import shutil
 import struct
+import tarfile
 import urllib.request
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Sequence
@@ -19,6 +22,24 @@ MNIST_FILES = {
     "test_images": "t10k-images-idx3-ubyte",
     "test_labels": "t10k-labels-idx1-ubyte",
 }
+
+# Official CIFAR mirrors (Alex Krizhevsky / U. Toronto).
+CIFAR10_URL = "https://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz"
+CIFAR100_URL = "https://www.cs.toronto.edu/~kriz/cifar-100-python.tar.gz"
+
+# Full ImageNet (1.28M images, ~150GB, requires a license/account) is not
+# practical to auto-download inside a script. Tiny-ImageNet-200 is a real,
+# freely-downloadable, ImageNet-derived benchmark (200 classes, 64x64,
+# images drawn directly from ImageNet) and is used here as the
+# "imagenet"-family entry point.
+TINY_IMAGENET_URL = "http://cs231n.stanford.edu/tiny-imagenet-200.zip"
+
+CIFAR10_MEAN = (0.4914, 0.4822, 0.4465)
+CIFAR10_STD = (0.2470, 0.2435, 0.2616)
+CIFAR100_MEAN = (0.5071, 0.4865, 0.4409)
+CIFAR100_STD = (0.2673, 0.2564, 0.2762)
+TINY_IMAGENET_MEAN = (0.4802, 0.4481, 0.3975)
+TINY_IMAGENET_STD = (0.2770, 0.2691, 0.2821)
 
 
 @dataclass
@@ -714,6 +735,318 @@ def _load_mnist_bundle(data_cfg: dict, output_dir: Path) -> DatasetBundle:
         input_shape=input_shape,
     )
 
+def _ensure_and_extract_archive(url: str, data_dir: Path, marker_dir: Path) -> None:
+    """Finds a local archive copy (tar/zip) or downloads it if missing, then extracts it."""
+    if marker_dir.exists():
+        return
+
+    data_dir.mkdir(parents=True, exist_ok=True)
+    default_name = Path(url).name
+    
+    # Build a list of potential local archive file matches
+    candidates = [data_dir / default_name]
+    if "cifar-100" in url:
+        # Gracefully account for your local ".tar.zip" naming variation
+        candidates.append(data_dir / "cifar-100-python.tar.zip")
+        candidates.append(data_dir / "cifar-100-python.zip")
+
+    archive_path = None
+    for candidate in candidates:
+        if candidate.exists():
+            if tarfile.is_tarfile(candidate) or zipfile.is_zipfile(candidate):
+                archive_path = candidate
+                break
+            else:
+                # Discard corrupted/broken incomplete files from a previous run
+                candidate.unlink()
+
+    # If no valid local archive file exists, fallback to downloading it
+    if archive_path is None:
+        archive_path = data_dir / default_name
+        tmp_path = archive_path.with_suffix(archive_path.suffix + ".part")
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            )
+            with urllib.request.urlopen(req) as response, open(tmp_path, "wb") as dst:
+                shutil.copyfileobj(response, dst)
+
+            if not tarfile.is_tarfile(tmp_path) and not zipfile.is_zipfile(tmp_path):
+                raise IOError(f"Downloaded file from {url} is not a valid archive format.")
+            tmp_path.rename(archive_path)
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
+
+    # Dynamic extraction based on the detected file type
+    if zipfile.is_zipfile(archive_path):
+        with zipfile.ZipFile(archive_path, "r") as zf:
+            zf.extractall(data_dir)
+    else:
+        try:
+            with tarfile.open(archive_path, "r:gz") as tar:
+                tar.extractall(data_dir)
+        except tarfile.ReadError:
+            # Fallback if tar compression isn't strictly gzip-encoded
+            with tarfile.open(archive_path, "r:*") as tar:
+                tar.extractall(data_dir)
+
+
+def _download_and_extract_zip(url: str, data_dir: Path, marker_dir: Path) -> None:
+    """Download `url` into data_dir and extract it, unless marker_dir already exists."""
+    if marker_dir.exists():
+        return
+    data_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = data_dir / Path(url).name
+
+    if archive_path.exists() and not zipfile.is_zipfile(archive_path):
+        archive_path.unlink()
+
+    if not archive_path.exists():
+        tmp_path = archive_path.with_suffix(archive_path.suffix + ".part")
+        try:
+            # FIX: Use urllib.request.Request to supply a standard browser User-Agent header
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            )
+            with urllib.request.urlopen(req) as response, open(tmp_path, "wb") as dst:
+                shutil.copyfileobj(response, dst)
+
+            if not zipfile.is_zipfile(tmp_path):
+                raise IOError(f"Downloaded file from {url} is not a valid zip archive (download likely failed).")
+            tmp_path.rename(archive_path)
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
+
+    with zipfile.ZipFile(archive_path, "r") as zf:
+        zf.extractall(data_dir)
+
+
+def _unpickle(path: Path) -> dict:
+    with open(path, "rb") as f:
+        return pickle.load(f, encoding="bytes")
+
+
+def _normalize_image_batch(images_u8: np.ndarray, mean: tuple, std: tuple) -> np.ndarray:
+    """images_u8: (N, C, H, W) uint8 -> normalized float32."""
+    x = images_u8.astype(np.float32) / 255.0
+    mean_arr = np.asarray(mean, dtype=np.float32).reshape(1, -1, 1, 1)
+    std_arr = np.asarray(std, dtype=np.float32).reshape(1, -1, 1, 1)
+    return (x - mean_arr) / std_arr
+
+
+def save_image_grid_visualizations(
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    x_test: np.ndarray,
+    y_test: np.ndarray,
+    num_classes: int,
+    out_dir: Path,
+    title_prefix: str,
+    output_prefix: str,
+    class_names: Optional[Sequence[str]] = None,
+) -> None:
+    """Generic RGB/gray image-grid + class-distribution visualizer (CIFAR/Tiny-ImageNet)."""
+    n_show = min(num_classes, 20)
+    cols = 5
+    rows = int(np.ceil(n_show / cols))
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 2.2, rows * 2.2))
+    fig.suptitle(f"{title_prefix} Training Dataset Samples", fontsize=16)
+    axes = np.atleast_2d(axes)
+    for class_idx in range(rows * cols):
+        row, col = divmod(class_idx, cols)
+        ax = axes[row, col]
+        if class_idx < n_show:
+            idxs = np.where(y_train == class_idx)[0]
+            if idxs.size > 0:
+                img = np.transpose(x_train[idxs[0]], (1, 2, 0))
+                img = (img - img.min()) / max(img.max() - img.min(), 1e-8)
+                ax.imshow(img)
+                label = class_names[class_idx] if class_names is not None else str(class_idx)
+                ax.set_title(label, fontsize=8)
+        ax.axis("off")
+    plt.tight_layout()
+    plt.savefig(out_dir / f"{output_prefix}_dataset_samples.png", dpi=150, bbox_inches="tight")
+    plt.close()
+
+    train_counts = np.bincount(y_train, minlength=num_classes)
+    test_counts = np.bincount(y_test, minlength=num_classes)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    ax1.bar(np.arange(num_classes), train_counts, alpha=0.8, color="skyblue")
+    ax1.set_title("Train Class Distribution")
+    ax2.bar(np.arange(num_classes), test_counts, alpha=0.8, color="salmon")
+    ax2.set_title("Test Class Distribution")
+    for ax in (ax1, ax2):
+        ax.set_xlabel("Class")
+        ax.set_ylabel("Count")
+        ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(out_dir / f"{output_prefix}_dataset_statistics.png", dpi=150, bbox_inches="tight")
+    plt.close()
+
+
+def _load_cifar10_bundle(data_cfg: dict, output_dir: Path) -> DatasetBundle:
+    data_dir = Path(str(data_cfg.get("data_dir", "./data"))).resolve()
+    extracted_dir = data_dir / "cifar-10-batches-py"
+    _ensure_and_extract_archive(CIFAR10_URL, data_dir, extracted_dir)
+
+    train_batches = [_unpickle(extracted_dir / f"data_batch_{i}") for i in range(1, 6)]
+    train_data = np.concatenate([b[b"data"] for b in train_batches], axis=0)
+    train_labels = np.concatenate([np.asarray(b[b"labels"]) for b in train_batches], axis=0)
+
+    test_batch = _unpickle(extracted_dir / "test_batch")
+    test_data = test_batch[b"data"]
+    test_labels = np.asarray(test_batch[b"labels"])
+
+    # Stored as (N, 3072) row-major R,G,B planes -> (N, 3, 32, 32).
+    x_train = train_data.reshape(-1, 3, 32, 32)
+    x_test = test_data.reshape(-1, 3, 32, 32)
+
+    x_train = _normalize_image_batch(x_train, CIFAR10_MEAN, CIFAR10_STD)
+    x_test = _normalize_image_batch(x_test, CIFAR10_MEAN, CIFAR10_STD)
+
+    y_train = train_labels.astype(np.int64)
+    y_test = test_labels.astype(np.int64)
+
+    num_classes = int(data_cfg.get("num_classes", 10))
+    if num_classes != 10:
+        raise ValueError("CIFAR-10 loader expects data.num_classes=10.")
+
+    meta = _unpickle(extracted_dir / "batches.meta")
+    class_names = [name.decode("utf-8") for name in meta[b"label_names"]]
+
+    save_image_grid_visualizations(
+        x_train, y_train, x_test, y_test, num_classes, output_dir,
+        title_prefix="CIFAR-10", output_prefix="cifar10", class_names=class_names,
+    )
+
+    class_to_indices = build_class_index_map(y_train, num_classes)
+    return DatasetBundle(
+        train_inputs=x_train, train_targets=y_train,
+        test_inputs=x_test, test_targets=y_test,
+        class_to_indices=class_to_indices,
+        num_classes=num_classes,
+        input_shape=tuple(x_train.shape[1:]),
+    )
+
+
+def _load_cifar100_bundle(data_cfg: dict, output_dir: Path) -> DatasetBundle:
+    data_dir = Path(str(data_cfg.get("data_dir", "./data"))).resolve()
+    extracted_dir = data_dir / "cifar-100-python"
+    _ensure_and_extract_archive(CIFAR100_URL, data_dir, extracted_dir)
+
+    label_mode = str(data_cfg.get("label_mode", "fine")).strip().lower()
+    if label_mode not in {"fine", "coarse"}:
+        raise ValueError("For CIFAR-100, data.label_mode must be 'fine' (100 classes) or 'coarse' (20 classes).")
+    label_key = b"fine_labels" if label_mode == "fine" else b"coarse_labels"
+
+    train_batch = _unpickle(extracted_dir / "train")
+    test_batch = _unpickle(extracted_dir / "test")
+
+    x_train = train_batch[b"data"].reshape(-1, 3, 32, 32)
+    x_test = test_batch[b"data"].reshape(-1, 3, 32, 32)
+    x_train = _normalize_image_batch(x_train, CIFAR100_MEAN, CIFAR100_STD)
+    x_test = _normalize_image_batch(x_test, CIFAR100_MEAN, CIFAR100_STD)
+
+    y_train = np.asarray(train_batch[label_key], dtype=np.int64)
+    y_test = np.asarray(test_batch[label_key], dtype=np.int64)
+
+    default_num_classes = 100 if label_mode == "fine" else 20
+    num_classes = int(data_cfg.get("num_classes", default_num_classes))
+    if num_classes != default_num_classes:
+        raise ValueError(
+            f"CIFAR-100 loader with label_mode='{label_mode}' expects data.num_classes={default_num_classes}."
+        )
+
+    meta = _unpickle(extracted_dir / "meta")
+    meta_key = b"fine_label_names" if label_mode == "fine" else b"coarse_label_names"
+    class_names = [name.decode("utf-8") for name in meta[meta_key]]
+
+    save_image_grid_visualizations(
+        x_train, y_train, x_test, y_test, num_classes, output_dir,
+        title_prefix=f"CIFAR-100 ({label_mode})", output_prefix=f"cifar100_{label_mode}",
+        class_names=class_names,
+    )
+
+    class_to_indices = build_class_index_map(y_train, num_classes)
+    return DatasetBundle(
+        train_inputs=x_train, train_targets=y_train,
+        test_inputs=x_test, test_targets=y_test,
+        class_to_indices=class_to_indices,
+        num_classes=num_classes,
+        input_shape=tuple(x_train.shape[1:]),
+    )
+
+
+def _load_tiny_imagenet_bundle(data_cfg: dict, output_dir: Path) -> DatasetBundle:
+    from PIL import Image  # local import: only needed for this dataset
+
+    data_dir = Path(str(data_cfg.get("data_dir", "./data"))).resolve()
+    extracted_dir = data_dir / "tiny-imagenet-200"
+    _download_and_extract_zip(TINY_IMAGENET_URL, data_dir, extracted_dir)
+
+    wnids = sorted((extracted_dir / "train").iterdir())
+    wnids = [p.name for p in wnids if p.is_dir()]
+    wnid_to_class = {wnid: idx for idx, wnid in enumerate(wnids)}
+    num_classes = len(wnids)
+
+    configured_num_classes = int(data_cfg.get("num_classes", num_classes))
+    if configured_num_classes != num_classes:
+        raise ValueError(f"Tiny-ImageNet loader found {num_classes} classes on disk; data.num_classes must match.")
+
+    def _load_image(path: Path) -> np.ndarray:
+        with Image.open(path) as img:
+            return np.asarray(img.convert("RGB"), dtype=np.uint8)
+
+    train_images: list[np.ndarray] = []
+    train_labels: list[int] = []
+    for wnid in wnids:
+        img_dir = extracted_dir / "train" / wnid / "images"
+        for img_path in sorted(img_dir.glob("*.JPEG")):
+            train_images.append(_load_image(img_path))
+            train_labels.append(wnid_to_class[wnid])
+
+    val_dir = extracted_dir / "val"
+    val_annotations = {}
+    with open(val_dir / "val_annotations.txt", "r", encoding="utf-8") as f:
+        for line in f:
+            parts = line.strip().split("\t")
+            val_annotations[parts[0]] = parts[1]
+
+    test_images: list[np.ndarray] = []
+    test_labels: list[int] = []
+    for img_name, wnid in val_annotations.items():
+        if wnid not in wnid_to_class:
+            continue
+        img_path = val_dir / "images" / img_name
+        test_images.append(_load_image(img_path))
+        test_labels.append(wnid_to_class[wnid])
+
+    x_train = np.transpose(np.stack(train_images, axis=0), (0, 3, 1, 2))
+    x_test = np.transpose(np.stack(test_images, axis=0), (0, 3, 1, 2))
+    x_train = _normalize_image_batch(x_train, TINY_IMAGENET_MEAN, TINY_IMAGENET_STD)
+    x_test = _normalize_image_batch(x_test, TINY_IMAGENET_MEAN, TINY_IMAGENET_STD)
+
+    y_train = np.asarray(train_labels, dtype=np.int64)
+    y_test = np.asarray(test_labels, dtype=np.int64)
+
+    save_image_grid_visualizations(
+        x_train, y_train, x_test, y_test, num_classes, output_dir,
+        title_prefix="Tiny-ImageNet-200", output_prefix="tiny_imagenet",
+    )
+
+    class_to_indices = build_class_index_map(y_train, num_classes)
+    return DatasetBundle(
+        train_inputs=x_train, train_targets=y_train,
+        test_inputs=x_test, test_targets=y_test,
+        class_to_indices=class_to_indices,
+        num_classes=num_classes,
+        input_shape=tuple(x_train.shape[1:]),
+    )
+
 
 def _load_spiral_bundle(data_cfg: dict, output_dir: Path) -> DatasetBundle:
     _validate_spiral_data_config(data_cfg)
@@ -1076,6 +1409,12 @@ def build_dataset_bundle(config: dict, output_dir: Path) -> DatasetBundle:
     dataset_name = str(data_cfg.get("dataset_name", "spiral")).strip().lower()
     if dataset_name == "mnist":
         return _load_mnist_bundle(data_cfg, output_dir)
+    if dataset_name == "cifar10":
+        return _load_cifar10_bundle(data_cfg, output_dir)
+    if dataset_name == "cifar100":
+        return _load_cifar100_bundle(data_cfg, output_dir)
+    if dataset_name == "tiny_imagenet":
+        return _load_tiny_imagenet_bundle(data_cfg, output_dir)
     if dataset_name == "spiral":
         return _load_spiral_bundle(data_cfg, output_dir)
     if dataset_name == "gaussian_blobs":
@@ -1092,5 +1431,6 @@ def build_dataset_bundle(config: dict, output_dir: Path) -> DatasetBundle:
         return _load_dartboard_bundle(data_cfg, output_dir)
     raise ValueError(
         "Unsupported dataset_name "
-        f"'{dataset_name}'. Expected 'mnist', 'spiral', 'gaussian_blobs', 'blobs', 'rings', 'checkerboard', 'random_checkerboard', or 'dartboard'."
+        f"'{dataset_name}'. Expected 'mnist', 'cifar10', 'cifar100', 'tiny_imagenet', 'spiral', "
+        "'gaussian_blobs', 'blobs', 'rings', 'checkerboard', 'random_checkerboard', or 'dartboard'."
     )

@@ -187,9 +187,14 @@ def plot_training_report(
     train_acc_pc = [[] for _ in range(num_classes)]
     test_acc_pc = [[] for _ in range(num_classes)]
     tpt_step = -1.0
+    
+    has_per_class = False
 
     with open(csv_path, "r", encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
+        if reader.fieldnames and "train_loss_class_0" in reader.fieldnames:
+            has_per_class = True
+            
         for row in reader:
             steps.append(_to_float(row.get("global_step", "")))
             train_loss.append(_to_float(row.get("train_loss", "")))
@@ -201,19 +206,27 @@ def plot_training_report(
             if tpt_step < 0.0 and np.isfinite(row_tpt_step) and row_tpt_step >= 0.0:
                 tpt_step = row_tpt_step
 
-            for class_id in range(num_classes):
-                train_loss_pc[class_id].append(_to_float(row.get(f"train_loss_class_{class_id}", "")))
-                test_loss_pc[class_id].append(_to_float(row.get(f"test_loss_class_{class_id}", "")))
-                train_acc_pc[class_id].append(_to_float(row.get(f"train_accuracy_class_{class_id}", "")))
-                test_acc_pc[class_id].append(_to_float(row.get(f"test_accuracy_class_{class_id}", "")))
+            if has_per_class:
+                for class_id in range(num_classes):
+                    train_loss_pc[class_id].append(_to_float(row.get(f"train_loss_class_{class_id}", "")))
+                    test_loss_pc[class_id].append(_to_float(row.get(f"test_loss_class_{class_id}", "")))
+                    train_acc_pc[class_id].append(_to_float(row.get(f"train_accuracy_class_{class_id}", "")))
+                    test_acc_pc[class_id].append(_to_float(row.get(f"test_accuracy_class_{class_id}", "")))
 
     if not steps:
         raise ValueError(f"No rows were found in metrics CSV: {csv_path}")
 
     steps_arr = np.array(steps, dtype=np.float64)
-    fig, axes = plt.subplots(3, 2, figsize=(18, 14), sharex=True)
+    
+    if has_per_class:
+        fig, axes = plt.subplots(3, 2, figsize=(18, 14), sharex=True)
+    else:
+        fig, axes = plt.subplots(1, 2, figsize=(18, 5), sharex=True)
+        axes = np.expand_dims(axes, axis=0) # Make it (1, 2) to maintain standard indexing
+
     fig.suptitle(title, fontsize=16)
 
+    # Row 0: Overall Loss & Accuracy
     ax = axes[0, 0]
     ax.plot(steps_arr, train_loss, linewidth=2.0, label="Train")
     ax.plot(steps_arr, test_loss, linewidth=2.0, label="Test")
@@ -231,43 +244,45 @@ def plot_training_report(
     ax.grid(True, alpha=0.3)
     ax.legend()
 
-    ax = axes[1, 0]
-    for class_id in range(num_classes):
-        ax.plot(steps_arr, train_loss_pc[class_id], linewidth=1.5, label=f"C{class_id}")
-    ax.set_ylabel("Loss")
-    ax.set_title("Train Loss Per Class")
-    ax.grid(True, alpha=0.3)
+    # Rows 1 & 2: Conditional Per-Class plots
+    if has_per_class:
+        ax = axes[1, 0]
+        for class_id in range(num_classes):
+            ax.plot(steps_arr, train_loss_pc[class_id], linewidth=1.5, label=f"C{class_id}")
+        ax.set_ylabel("Loss")
+        ax.set_title("Train Loss Per Class")
+        ax.grid(True, alpha=0.3)
 
-    ax = axes[1, 1]
-    for class_id in range(num_classes):
-        ax.plot(steps_arr, test_loss_pc[class_id], linewidth=1.5, label=f"C{class_id}")
-    ax.set_ylabel("Loss")
-    ax.set_title("Test Loss Per Class")
-    ax.grid(True, alpha=0.3)
+        ax = axes[1, 1]
+        for class_id in range(num_classes):
+            ax.plot(steps_arr, test_loss_pc[class_id], linewidth=1.5, label=f"C{class_id}")
+        ax.set_ylabel("Loss")
+        ax.set_title("Test Loss Per Class")
+        ax.grid(True, alpha=0.3)
 
-    ax = axes[2, 0]
-    for class_id in range(num_classes):
-        ax.plot(steps_arr, train_acc_pc[class_id], linewidth=1.5, label=f"C{class_id}")
-    ax.set_xlabel("Global Step")
-    ax.set_ylabel("Accuracy")
-    ax.set_ylim(0.0, 1.0)
-    ax.set_title("Train Accuracy Per Class")
-    ax.grid(True, alpha=0.3)
+        ax = axes[2, 0]
+        for class_id in range(num_classes):
+            ax.plot(steps_arr, train_acc_pc[class_id], linewidth=1.5, label=f"C{class_id}")
+        ax.set_xlabel("Global Step")
+        ax.set_ylabel("Accuracy")
+        ax.set_ylim(0.0, 1.0)
+        ax.set_title("Train Accuracy Per Class")
+        ax.grid(True, alpha=0.3)
 
-    ax = axes[2, 1]
-    for class_id in range(num_classes):
-        ax.plot(steps_arr, test_acc_pc[class_id], linewidth=1.5, label=f"C{class_id}")
-    ax.set_xlabel("Global Step")
-    ax.set_ylabel("Accuracy")
-    ax.set_ylim(0.0, 1.0)
-    ax.set_title("Test Accuracy Per Class")
-    ax.grid(True, alpha=0.3)
+        ax = axes[2, 1]
+        for class_id in range(num_classes):
+            ax.plot(steps_arr, test_acc_pc[class_id], linewidth=1.5, label=f"C{class_id}")
+        ax.set_xlabel("Global Step")
+        ax.set_ylabel("Accuracy")
+        ax.set_ylim(0.0, 1.0)
+        ax.set_title("Test Accuracy Per Class")
+        ax.grid(True, alpha=0.3)
 
-    if num_classes <= 12:
-        axes[1, 0].legend(loc="best", ncol=2, fontsize=8)
-        axes[1, 1].legend(loc="best", ncol=2, fontsize=8)
-        axes[2, 0].legend(loc="best", ncol=2, fontsize=8)
-        axes[2, 1].legend(loc="best", ncol=2, fontsize=8)
+        if num_classes <= 12:
+            axes[1, 0].legend(loc="best", ncol=2, fontsize=8)
+            axes[1, 1].legend(loc="best", ncol=2, fontsize=8)
+            axes[2, 0].legend(loc="best", ncol=2, fontsize=8)
+            axes[2, 1].legend(loc="best", ncol=2, fontsize=8)
 
     if tpt_step >= 0.0:
         for axis in axes.flat:
@@ -282,7 +297,6 @@ def plot_training_report(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(output_path, dpi=180, bbox_inches="tight")
     plt.close(fig)
-
 
 def plot_example_distribution_dynamics(
     class_distribution_history: np.ndarray,

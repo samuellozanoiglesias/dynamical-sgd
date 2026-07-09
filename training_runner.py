@@ -81,6 +81,14 @@ from projection_PCA_analysis import (
         initialize_proj_nc_csv,
     )
 
+from metrics_for_multiple_classes import (
+    append_multiclass_csv_row,
+    collect_multiclass_epoch,
+    finalize_multiclass_plots,
+    initialize_multiclass_csv,
+    compute_batched_logits,
+)
+
 from model import JAXModel, ParamTree, build_model
 
 
@@ -348,6 +356,7 @@ def _update_stats(
     preds: jax.Array,
     target: jax.Array,
     num_classes: int,
+    compute_per_class: bool = True, # <-- New flag
 ) -> None:
     loss_np = np.asarray(per_sample_loss, dtype=np.float64)
     preds_np = np.asarray(preds, dtype=np.int64)
@@ -358,13 +367,14 @@ def _update_stats(
     stats.correct_sum += int(np.sum(correct_np))
     stats.count_sum += int(target_np.shape[0])
 
-    class_count = np.bincount(target_np, minlength=num_classes).astype(np.float64)
-    class_loss = np.bincount(target_np, weights=loss_np, minlength=num_classes).astype(np.float64)
-    class_correct = np.bincount(target_np, weights=correct_np, minlength=num_classes).astype(np.float64)
+    if compute_per_class:
+        class_count = np.bincount(target_np, minlength=num_classes).astype(np.float64)
+        class_loss = np.bincount(target_np, weights=loss_np, minlength=num_classes).astype(np.float64)
+        class_correct = np.bincount(target_np, weights=correct_np, minlength=num_classes).astype(np.float64)
 
-    stats.class_count_sum += class_count
-    stats.class_loss_sum += class_loss
-    stats.class_correct_sum += class_correct
+        stats.class_count_sum += class_count
+        stats.class_loss_sum += class_loss
+        stats.class_correct_sum += class_correct
 
 
 def _finalize_stats(stats: RunningStats) -> Dict[str, Any]:
@@ -499,6 +509,7 @@ def evaluate_arrays(
     batch_size: int,
     device: jax.Device,
     num_classes: int,
+    compute_per_class: bool = True, # <-- New flag
 ) -> Dict[str, Any]:
     stats = _init_stats(num_classes)
 
@@ -508,7 +519,9 @@ def evaluate_arrays(
         logits = predict_step(params, x)
         per_sample_loss = optax.softmax_cross_entropy_with_integer_labels(logits, y)
         preds = jnp.argmax(logits, axis=1)
-        _update_stats(stats, per_sample_loss, preds, y, num_classes)
+        
+        # Pass the flag down
+        _update_stats(stats, per_sample_loss, preds, y, num_classes, compute_per_class)
 
     return _finalize_stats(stats)
 
@@ -563,6 +576,7 @@ def train_epoch(
     grad_mask: ParamTree,
     reinit_key: jax.Array,
     initial_params: ParamTree,
+    compute_per_class: bool = True, # <-- NEW ARGUMENT
 ) -> tuple[
     ParamTree,
     optax.OptState,
@@ -703,7 +717,7 @@ def train_epoch(
         prev_params = params
         last_classifier_grads = classifier_grads
 
-        _update_stats(stats, per_sample_loss, preds, y, num_classes)
+        _update_stats(stats, per_sample_loss, preds, y, num_classes, compute_per_class)
         global_step += 1
 
     if sampled_distributions:
@@ -729,7 +743,7 @@ def train_epoch(
     )
 
 
-def _csv_header(num_classes: int) -> list[str]:
+def _csv_header(num_classes: int, training_results: str = "all") -> list[str]:
     base = [
         "epoch",
         "global_step",
@@ -745,14 +759,15 @@ def _csv_header(num_classes: int) -> list[str]:
         "test_loss",
         "test_accuracy",
     ]
-    for class_id in range(num_classes):
-        base.append(f"train_loss_class_{class_id}")
-    for class_id in range(num_classes):
-        base.append(f"train_accuracy_class_{class_id}")
-    for class_id in range(num_classes):
-        base.append(f"test_loss_class_{class_id}")
-    for class_id in range(num_classes):
-        base.append(f"test_accuracy_class_{class_id}")
+    if training_results == "all":
+        for class_id in range(num_classes):
+            base.append(f"train_loss_class_{class_id}")
+        for class_id in range(num_classes):
+            base.append(f"train_accuracy_class_{class_id}")
+        for class_id in range(num_classes):
+            base.append(f"test_loss_class_{class_id}")
+        for class_id in range(num_classes):
+            base.append(f"test_accuracy_class_{class_id}")
     return base
 
 
@@ -765,6 +780,7 @@ def _metric_row(
     train_metrics: Dict[str, Any],
     test_metrics: Dict[str, Any],
     num_classes: int,
+    training_results: str = "all",
 ) -> list[Any]:
     row: list[Any] = [
         epoch,
@@ -781,14 +797,15 @@ def _metric_row(
         float(test_metrics["loss"]),
         float(test_metrics["accuracy"]),
     ]
-    for class_id in range(num_classes):
-        row.append(float(train_metrics["per_class_loss"][class_id]))
-    for class_id in range(num_classes):
-        row.append(float(train_metrics["per_class_accuracy"][class_id]))
-    for class_id in range(num_classes):
-        row.append(float(test_metrics["per_class_loss"][class_id]))
-    for class_id in range(num_classes):
-        row.append(float(test_metrics["per_class_accuracy"][class_id]))
+    if training_results == "all":
+        for class_id in range(num_classes):
+            row.append(float(train_metrics["per_class_loss"][class_id]))
+        for class_id in range(num_classes):
+            row.append(float(train_metrics["per_class_accuracy"][class_id]))
+        for class_id in range(num_classes):
+            row.append(float(test_metrics["per_class_loss"][class_id]))
+        for class_id in range(num_classes):
+            row.append(float(test_metrics["per_class_accuracy"][class_id]))
     return row
 
 
@@ -799,6 +816,12 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
     dynamics_cfg = config.get("dynamics", {})
     optimizer_cfg = config.get("optimizer", {})
     analysis_cfg = config.get("analysis", {})
+
+    training_results = str(analysis_cfg.get("compute_results", "all")).strip().lower()
+    if training_results not in {"all", "average"}:
+        training_results = "all"
+
+    compute_per_class_flag = (training_results == "all")
 
     dataset_name = str(data_cfg.get("dataset_name", "spiral"))
     dataset_key = dataset_name.strip().lower()
@@ -881,7 +904,7 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
     test_metric_inputs = dataset_bundle.test_inputs
     test_metric_targets = dataset_bundle.test_targets
     metric_subset_size: int | None = None
-    if dataset_key == "mnist":
+    if dataset_key in {"mnist", "cifar10", "cifar100", "tiny_imagenet"}:
         metric_subset_size = int(
             analysis_cfg.get("metric_subset_size", data_cfg.get("metric_subset_size", 5000))
         )
@@ -1011,11 +1034,12 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
     enable_geo_metrics = _analysis_output_enabled(analysis_cfg, ("PCA_geometric", "pca_geometric", "pca_geometric_overlapping"),)
     enable_hp_metrics = _analysis_output_enabled(analysis_cfg, ("hyperplane_metrics", "hyperplanes"))
     enable_proj_nc = _analysis_output_enabled(analysis_cfg, ("proj_nc_analysis",))
-    
+    enable_multiclass_metrics = _analysis_output_enabled(analysis_cfg, ("multiclass_metrics",))
+
     collect_pre_classifier = (
         enable_classifier_metrics or enable_pca_analysis
         or enable_geo_metrics or enable_hp_metrics
-        or enable_proj_nc
+        or enable_proj_nc or enable_multiclass_metrics
     )
 
     nc_class_pairs = build_nc_class_pairs(num_classes)
@@ -1098,6 +1122,13 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
             num_classes=num_classes,
             class_pairs=nc_class_pairs,
         )
+    
+    multiclass_csv_path: Path | None = None
+    multiclass_figure_path: Path | None = None
+    if enable_multiclass_metrics:
+        multiclass_csv_path = run_dir / "metrics_for_multiple_classes.csv"
+        multiclass_figure_path = run_dir / "metrics_for_multiple_classes.png"
+        initialize_multiclass_csv(multiclass_csv_path)
 
     if use_pytorch_cnn:
         predict_step = lambda step_params, batch_x: model.apply(step_params, batch_x)
@@ -1134,7 +1165,7 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
 
     with open(csv_path, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(_csv_header(num_classes))
+        writer.writerow(_csv_header(num_classes, training_results))
         f.flush()
 
         for epoch in range(1, total_epochs + 1):
@@ -1204,6 +1235,7 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
                 grad_mask=grad_mask,
                 reinit_key=reinit_key,
                 initial_params=initial_params,
+                compute_per_class=compute_per_class_flag
             )
             if freeze_step is not None and freeze_step_applied is None:
                 freeze_step_applied = int(freeze_step)
@@ -1221,6 +1253,7 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
                 batch_size=eval_batch_size,
                 device=device,
                 num_classes=num_classes,
+                compute_per_class=compute_per_class_flag, # Pass it here
             )
             test_metrics = evaluate_arrays(
                 params=params,
@@ -1230,6 +1263,7 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
                 batch_size=eval_batch_size,
                 device=device,
                 num_classes=num_classes,
+                compute_per_class=compute_per_class_flag, # Pass it here
             )
 
             if enable_nc_metrics:
@@ -1401,6 +1435,48 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
                     num_classes=num_classes,
                 )
 
+            if enable_multiclass_metrics:
+                if pre_classifier is None or labels is None or logits is None:
+                    raise RuntimeError(
+                        "multiclass_metrics enabled but pre-classifier/logits were not collected."
+                    )
+                test_logits, test_labels = compute_batched_logits(
+                    model=model,
+                    params=params,
+                    inputs=test_metric_inputs,
+                    targets=test_metric_targets,
+                    eval_batch_size=eval_batch_size,
+                )
+                if use_pytorch_cnn:
+                    weight_matrix = (
+                        classifier.weight.detach().cpu().numpy().astype(np.float64)
+                    )
+                    initial_weight_matrix = initial_classifier_weight
+                else:
+                    weight_matrix = np.asarray(
+                        model.classifier_weight_matrix(params), dtype=np.float64
+                    )
+                    initial_weight_matrix = np.asarray(
+                        model.classifier_weight_matrix(initial_params), dtype=np.float64
+                    )
+                mc_raw = collect_multiclass_epoch(
+                    pre_classifier=pre_classifier,
+                    targets=labels,
+                    train_logits=logits,
+                    test_logits=test_logits,
+                    test_targets=test_labels,
+                    weight_matrix=weight_matrix,
+                    initial_weight_matrix=initial_weight_matrix,
+                    cumulative_weight_distance=cumulative_weight_distance,
+                    num_classes=num_classes,
+                )
+                append_multiclass_csv_row(
+                    csv_path=multiclass_csv_path,
+                    epoch=epoch,
+                    global_step=global_step,
+                    raw=mc_raw,
+                )
+
             if (not tpt_reached) and bool(train_metrics.get("zero_training_error", False)):
                 tpt_reached = True
                 tpt_step = global_step
@@ -1414,6 +1490,7 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
                 train_metrics=train_metrics,
                 test_metrics=test_metrics,
                 num_classes=num_classes,
+                training_results=training_results,
             )
             writer.writerow(row)
             f.flush()
@@ -1520,6 +1597,12 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
             output_path=proj_nc_figure_path,
             num_classes=num_classes,
             class_pairs=nc_class_pairs,
+            tpt_step=tpt_step if tpt_reached else -1,
+        )
+    if enable_multiclass_metrics:
+        finalize_multiclass_plots(
+            csv_path=multiclass_csv_path,
+            output_path=multiclass_figure_path,
             tpt_step=tpt_step if tpt_reached else -1,
         )
 

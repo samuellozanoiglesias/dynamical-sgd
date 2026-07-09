@@ -176,3 +176,4 @@ output*
 *.log
 logs*
 *.err
+data/
