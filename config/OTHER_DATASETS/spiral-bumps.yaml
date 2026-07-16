@@ -48,11 +48,13 @@ analysis:
   plot_version: simplified
   outputs:
     classifier_metrics: true
-    nc_metrics: true
+    nc_metrics: false
     separability_metrics: false
-    pca_analysis: true
-    pca_geometric: true
-    hyperplane_metrics: true
+    pca_analysis: false
+    pca_geometric: false
+    hyperplane_metrics: false
+    proj_nc_analysis: false
+    multiclass_metrics: false
   pca:
     projected_dims: [1, 2, 3, 5]
 output:

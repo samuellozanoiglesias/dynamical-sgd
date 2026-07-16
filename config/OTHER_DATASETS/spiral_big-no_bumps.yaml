@@ -54,6 +54,7 @@ analysis:
     pca_geometric: true
     hyperplane_metrics: true
     proj_nc_analysis: true
+    multiclass_metrics: false
   pca:
     projected_dims: [1, 2, 3, 5]
 output:

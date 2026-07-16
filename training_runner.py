@@ -992,6 +992,7 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
                 f"Unknown model.cnn.backbone '{backbone_name}'. Expected 'resnet18' or 'simple_cnn'."
             )
         initial_classifier_weight = (classifier.weight.detach().cpu().clone().numpy())
+        last_classifier_weight = initial_classifier_weight.copy()
         model = TorchModelAdapter(torch_model, classifier, feature_capture, torch_device, init_type=str(model_cfg.get("init_type", "pytorch_default")),)
         params = None
         initial_params = None
@@ -1009,6 +1010,8 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
         model = built_model.model
         params = jax.device_put(built_model.params, device=device)
         initial_params = params
+        initial_classifier_weight = np.asarray(model.classifier_weight_matrix(initial_params), dtype=np.float64,)
+        last_classifier_weight = initial_classifier_weight.copy()
         cumulative_weight_distance = 0.0
         prev_params = params
         grad_mask = _build_grad_mask(params, None)
@@ -1329,20 +1332,19 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
                 if pre_classifier is None or logits is None or labels is None:
                     raise RuntimeError("Classifier metrics enabled but no pre-classifier outputs were collected.")
                 
+                initial_weight_matrix = initial_classifier_weight
+
                 if use_pytorch_cnn:
                     weight_matrix = (classifier.weight.detach().cpu().numpy().astype(np.float64))
-                    initial_weight_matrix = initial_classifier_weight
                 else:
                     weight_matrix = np.asarray(model.classifier_weight_matrix(params), dtype=np.float64,)
-                    initial_weight_matrix = np.asarray(model.classifier_weight_matrix(initial_params), dtype=np.float64,)
-                
+                    
                 classifier_raw = collect_classifier_epoch(
                     pre_classifier=pre_classifier,
                     logits=logits,
                     targets=labels,
                     weight_matrix=weight_matrix,
                 )
-
                 
                 advanced_classifier_raw = collect_advanced_classifier_metrics(
                     weight_matrix=weight_matrix,
@@ -1351,7 +1353,10 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
                     logits=logits,
                     targets=labels,
                     grads=last_classifier_grads,
+                    previous_weight_matrix=last_classifier_weight,
                 )
+
+                last_classifier_weight = weight_matrix.copy()
                 append_classifier_csv_row(
                     csv_path=classifier_csv_path,
                     epoch=epoch,
@@ -1457,18 +1462,13 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
                     targets=test_metric_targets,
                     eval_batch_size=eval_batch_size,
                 )
+                initial_weight_matrix = initial_classifier_weight
+
                 if use_pytorch_cnn:
-                    weight_matrix = (
-                        classifier.weight.detach().cpu().numpy().astype(np.float64)
-                    )
-                    initial_weight_matrix = initial_classifier_weight
+                    weight_matrix = (classifier.weight.detach().cpu().numpy().astype(np.float64))
                 else:
-                    weight_matrix = np.asarray(
-                        model.classifier_weight_matrix(params), dtype=np.float64
-                    )
-                    initial_weight_matrix = np.asarray(
-                        model.classifier_weight_matrix(initial_params), dtype=np.float64
-                    )
+                    weight_matrix = np.asarray(model.classifier_weight_matrix(params), dtype=np.float64)
+
                 mc_raw = collect_multiclass_epoch(
                     pre_classifier=pre_classifier,
                     targets=labels,
