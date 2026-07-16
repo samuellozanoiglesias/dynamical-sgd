@@ -1,3 +1,12 @@
+import os
+import sys
+
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+from model import build_model
+
 import pickle
 from pathlib import Path
 import numpy as np
@@ -7,10 +16,21 @@ from matplotlib.colors import ListedColormap
 import argparse
 import json
 from pathlib import Path
+from typing import Any, Dict, Iterable, List, Tuple
+import yaml
+from matplotlib import rcParams
 
-# You will need to import your specific model builder here
-# to recreate the JAXModel object before applying the loaded parameters.
-from model import build_model 
+plt.rcParams.update({
+    "text.usetex": True,
+    "font.family": "serif",
+    "font.serif": ["Latin Modern Roman"],
+    "font.size": 10,
+    "axes.labelsize": 18,
+    "axes.titlesize": 22,
+    "xtick.labelsize": 14,
+    "ytick.labelsize": 14,
+    "legend.fontsize": 20,
+})
 
 def _desaturate_towards_white(color: tuple[float, float, float, float], mix: float = 0.6) -> tuple[float, float, float, float]:
     r, g, b, _a = color
@@ -113,31 +133,60 @@ def plot_large_decision_boundaries(
         linewidths=2.0,
         label="Test samples",
     )
-
-    # Adjust colorbar label and tick sizes
-    cbar = fig.colorbar(contour, ax=ax, ticks=np.arange(num_classes))
-    cbar.set_label("Predicted class", fontsize=18)
-    cbar.ax.tick_params(labelsize=14)
-
     # Upgraded fonts for all textual elements
-    ax.set_title(title, fontsize=22, pad=15)
-    ax.set_xlabel("x", fontsize=18)
-    ax.set_ylabel("y", fontsize=18)
-    ax.tick_params(axis='both', which='major', labelsize=14)
+    #ax.set_title(title, fontsize=22, pad=15)
+    ax.set_xlabel("x", fontsize=34)
+    ax.set_ylabel("y", fontsize=34)
+    ax.tick_params(axis='both', which='major', labelsize=28)
     ax.grid(True, alpha=0.2)
     
     # Upgraded legend sizing
-    ax.legend(loc="upper right", fontsize=16, markerscale=1.2)
+    ax.legend(
+        loc="upper right",
+        fontsize=28,
+        markerscale=1.8,
+        framealpha=0.95,
+        handlelength=1.8,
+    )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     plt.tight_layout()
     plt.savefig(output_path, dpi=180, bbox_inches="tight")
+
+    from matplotlib.cm import ScalarMappable
+    from matplotlib.colors import BoundaryNorm
+
+    norm = BoundaryNorm(levels, background_cmap.N)
+
+    fig_cb, ax_cb = plt.subplots(figsize=(10.5, 0.9))
+
+    sm = ScalarMappable(norm=norm, cmap=background_cmap)
+    sm.set_array([])
+
+    cbar = fig_cb.colorbar(
+        sm,
+        cax=ax_cb,
+        orientation="horizontal",
+        ticks=np.arange(num_classes),
+    )
+
+    cbar.set_label(r"\textbf{Predicted class}", fontsize=48)
+    cbar.ax.tick_params(labelsize=30)
+
+    fig_cb.savefig(
+        output_path.with_name(output_path.stem + "_colorbar.png"),
+        dpi=300,
+        bbox_inches="tight",
+    )
+
+    plt.close(fig_cb)
+
     plt.close(fig)
     print(f"Plot successfully saved to: {output_path}")
 
 def main():
     # 1. Setup paths
-    run_dir = Path("path/to/your/run_directory") # <-- UPDATE THIS
+    run_dir = Path("/data/samuel_lozano/dynamical-sgd/without_bumps/spiral-no_bumps/training_2026_07_16-16_39_44/") # <-- UPDATE THIS
     dataset_path = run_dir / "dataset_bundle.npz"
     params_path = run_dir / "jax_params.pkl"
     output_plot_path = run_dir / "large_spiral_decision_boundaries.png"
@@ -156,17 +205,18 @@ def main():
         params = pickle.load(f)
 
     # 4. Re-instantiate your model (Requires your original config dictionary)
-    # You'll need to pass the same basic parameters you used during training.
-    # config = {...}
-    # built_model = build_model(model_cfg=config.get("model", {}), 
-    #                           input_shape=train_inputs.shape[1:], 
-    #                           num_classes=int(np.max(train_targets)) + 1, 
-    #                           random_seed=42)
-    # jax_model = built_model.model
-    
-    # NOTE: Since I don't have your config, the above is commented out. 
-    # Replace `None` below with your initialized `jax_model`.
-    jax_model = None 
+    def _load_config(config_path: Path) -> Dict[str, Any]:
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f) or {}
+        return config
+
+    config_path = run_dir / "config.yaml"
+    config = _load_config(config_path)
+    built_model = build_model(model_cfg=config.get("model", {}), 
+                               input_shape=train_inputs.shape[1:], 
+                               num_classes=int(np.max(train_targets)) + 1, 
+                               random_seed=42)
+    jax_model = built_model.model
 
     # 5. Generate the new plot
     print("Generating updated plot...")

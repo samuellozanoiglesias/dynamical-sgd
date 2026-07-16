@@ -47,7 +47,7 @@ dynamics:
 analysis:
   plot_version: simplified
   outputs:
-    classifier_metrics: true
+    classifier_metrics: false
     nc_metrics: false
     separability_metrics: false
     pca_analysis: false

@@ -5,30 +5,25 @@ import matplotlib.colors as mcolors
 from matplotlib.gridspec import GridSpec
 
 # Set style
+#plt.rcParams.update({
+#    'text.usetex': False,
+#    'font.family': 'serif',
+#    'font.serif': ['Times New Roman', 'DejaVu Serif'],
+#    'mathtext.fontset': 'cm',
+#    'font.size': 11,
+#    'axes.labelsize': 11,
+#    'axes.titlesize': 11,
+#    'xtick.labelsize': 9,
+#    'ytick.labelsize': 9,
+#    'legend.fontsize': 8.5,
+#    'axes.linewidth': 0.8,
+#})
+
 plt.rcParams.update({
-
-    'text.usetex': False,
-
-    'font.family': 'serif',
-
-    'font.serif': ['Times New Roman', 'DejaVu Serif'],
-
-    'mathtext.fontset': 'cm',
-
-    'font.size': 11,
-
-    'axes.labelsize': 11,
-
-    'axes.titlesize': 11,
-
-    'xtick.labelsize': 9,
-
-    'ytick.labelsize': 9,
-
-    'legend.fontsize': 8.5,
-
-    'axes.linewidth': 0.8,
-
+    "text.usetex": True,
+    "font.family": "serif",
+    "font.serif": ["Latin Modern Roman"],
+    "font.size": 10,
 })
 
 CLASS_NAMES = ['Class 1', 'Class 2', 'Class 3']
@@ -112,17 +107,17 @@ w_max = 30.0
 steps, proportions = compute_class_proportions(total_steps, period_length, w_max)
 for c in range(3):
      ax_a.plot(steps, proportions[:, c], color=CLASS_BASE[c], linewidth=2.5)
-ax_a.set_xlabel('Training steps', fontsize=16)
-ax_a.set_ylabel('Class focus proportion', fontsize=16)
+ax_a.set_xlabel('Training steps', fontsize=20)
+ax_a.set_ylabel('Class focus proportion', fontsize=20)
 ax_a.set_xlim(0, total_steps)
 ax_a.set_ylim(-0.02, 1.05)
 ax_a.grid(True, linestyle='--', alpha=0.8, color='#cccccc', linewidth=0.6)
 ax_a.set_xticks([0, 15000, 30000])
-ax_a.set_xticklabels(['0', '15,000', '30,000'], fontsize=14)
+ax_a.set_xticklabels(['0', '15,000', '30,000'], fontsize=18)
 ax_a.set_yticks([0.0, 0.5, 1.0])
-ax_a.set_yticklabels(['0', '0.5', '1.0'], fontsize=14)
+ax_a.set_yticklabels(['0', '0.5', '1.0'], fontsize=18)
 ax_a.tick_params(axis='both', which='major', width=1.2, length=6)
-ax_a.set_title("Class-Focus Oscillations", fontsize=18, fontweight='semibold', pad=12)
+ax_a.set_title(r'\textbf{Class-Focus Oscillations}', fontsize=22, fontweight='bold', pad=12)
 
 # Panel B
 R_b, r_b = 0.8, 0.35
@@ -157,19 +152,19 @@ z_std = 0.05 * t_std + rng.normal(0, 0.008, 200)
 ax_b.plot(x_std, y_std, z_std, color='#595959', linestyle=':', linewidth=1.5, alpha=0.9, label='Std SGD')
 ax_b.scatter([x_std[-1]], [y_std[-1]], [z_std[-1]], color='#C00000', marker='X', s=60, edgecolors='black', linewidths=0.7, zorder=10, label='Subopt.')
 
-ax_b.set_xlabel(r'$\theta_1$', labelpad=-1, fontsize=20)
-ax_b.set_ylabel(r'$\theta_2$', labelpad=-1, fontsize=20)
-ax_b.set_zlabel(r'$\theta_3$', labelpad=-1, fontsize=20)
+ax_b.set_xlabel(r'$\theta_1$', labelpad=-1, fontsize=24)
+ax_b.set_ylabel(r'$\theta_2$', labelpad=-1, fontsize=24)
+ax_b.set_zlabel(r'$\theta_3$', labelpad=-1, fontsize=24)
 ax_b.view_init(elev=20, azim=38)
 style_3d_axes(ax_b, zoom=1.35, show_grid=True) # Let's test 1.35 zoom on B!
 
 ax_b.set_xticks([-0.8, 0, 0.8])
-ax_b.set_xticklabels(['-1', '0', '1'], fontsize=14)
+ax_b.set_xticklabels(['-1', '0', '1'], fontsize=18)
 ax_b.set_yticks([-0.8, 0, 0.8])
-ax_b.set_yticklabels(['-1', '0', '1'], fontsize=14)
+ax_b.set_yticklabels(['-1', '0', '1'], fontsize=18)
 ax_b.set_zticks([0.0, 0.5, 1.0])
-ax_b.set_zticklabels(['-1', '0', '1'], fontsize=14)
-ax_b.set_title("Parameter Space", fontsize=18, fontweight='semibold', pad=12)
+ax_b.set_zticklabels(['-1', '0', '1'], fontsize=18)
+ax_b.set_title(r'\textbf{Parameter Space}', fontsize=22, fontweight='bold', pad=12)
 ax_b.legend(loc='upper right', bbox_to_anchor=(1.2, 1.02), frameon=True, framealpha=0.9, edgecolor='#e0e0e0', facecolor='#ffffff', fontsize=14, handlelength=1.4)
 
 # Panel C
@@ -198,9 +193,9 @@ for b_angle in boundary_angles:
     ax_c.plot_surface(X_G, Y_G, Z_G, color='#7F8C8D', alpha=0.10, shade=False, zorder=2)
     ax_c.plot(X_G[:, -1], Y_G[:, -1], Z_G[:, -1], color='#7F8C8D', linewidth=0.5, alpha=0.3)
 
-ax_c.set_xlabel(r'$\phi_1$', labelpad=-1, fontsize=20)
-ax_c.set_ylabel(r'$\phi_2$', labelpad=-1, fontsize=20)
-ax_c.set_zlabel(r'$\phi_3$', labelpad=-1, fontsize=20)
+ax_c.set_xlabel(r'$\phi_1$', labelpad=-1, fontsize=24)
+ax_c.set_ylabel(r'$\phi_2$', labelpad=-1, fontsize=24)
+ax_c.set_zlabel(r'$\phi_3$', labelpad=-1, fontsize=24)
 ax_c.set_xlim([-1.0, 1.0])
 ax_c.set_ylim([-1.0, 1.0])
 ax_c.set_zlim([-1.0, 1.0])
@@ -208,23 +203,23 @@ ax_c.view_init(elev=22, azim=40)
 style_3d_axes(ax_c, zoom=1.35, show_grid=True) # Zoom 1.35 on C too!
 
 ax_c.set_xticks([-1.0, 0, 1.0])
-ax_c.set_xticklabels(['-1', '0', '1'], fontsize=14)
+ax_c.set_xticklabels(['-1', '0', '1'], fontsize=18)
 ax_c.set_yticks([-1.0, 0, 1.0])
-ax_c.set_yticklabels(['-1', '0', '1'], fontsize=14)
+ax_c.set_yticklabels(['-1', '0', '1'], fontsize=18)
 ax_c.set_zticks([-1.0, 0, 1.0])
-ax_c.set_zticklabels(['-1', '0', '1'], fontsize=14)
-ax_c.set_title("Feature Space", fontsize=18, fontweight='semibold', pad=12)
+ax_c.set_zticklabels(['-1', '0', '1'], fontsize=18)
+ax_c.set_title(r'\textbf{Feature Space}', fontsize=22, fontweight='bold', pad=12)
 
 # Panel Labels
-ax_a.text(-0.16, 1.08, 'A', transform=ax_a.transAxes, **PANEL_LABEL_KW)
-ax_b.text2D(-0.12, 1.08, 'B', transform=ax_b.transAxes, **PANEL_LABEL_KW)
-ax_c.text2D(-0.12, 1.08, 'C', transform=ax_c.transAxes, **PANEL_LABEL_KW)
+ax_a.text(-0.16, 1.08, r'\textbf{A}', transform=ax_a.transAxes, **PANEL_LABEL_KW)
+ax_b.text2D(-0.12, 1.08, r'\textbf{B}', transform=ax_b.transAxes, **PANEL_LABEL_KW)
+ax_c.text2D(-0.12, 1.08, r'\textbf{C}', transform=ax_c.transAxes, **PANEL_LABEL_KW)
 
 # Global Legend
 lines = [plt.Line2D([0], [0], color=CLASS_BASE[i], lw=3.0) for i in range(3)]
-fig.legend(lines, CLASS_NAMES, loc='upper center', bbox_to_anchor=(0.5, 0.98), ncol=3, 
+fig.legend(lines, CLASS_NAMES, loc='upper center', bbox_to_anchor=(0.5, 1.0), ncol=3, 
            frameon=True, facecolor='white', edgecolor='#e0e0e0', framealpha=0.9, 
-           columnspacing=4.0, fontsize=16)
+           columnspacing=4.0, fontsize=22)
 
 fig.savefig('fig1_full_panel.png', bbox_inches='tight')
 fig.savefig('fig1_full_panel.pdf', bbox_inches='tight')
