@@ -26,7 +26,7 @@ cd /mnt/lustre/home/samuloza/dynamical-sgd/
 # handles auto-detection. You can change '--mode all' to 'single' or a specific 
 # configuration as outlined in your Python file's docstring.
 
-config_file="config/OTHER_DATASETS/spiral_big-always_bumps.yaml"
+config_file="config/CIFAR10/cifar10_resnet_narrow-no_bumps.yaml"
 
 echo "Starting training job with configuration: $config_file"
 python launch.py \

@@ -13,6 +13,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+import pickle
 
 import torch
 from model_cnn import (
@@ -1479,7 +1480,10 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
                     initial_weight_matrix=initial_weight_matrix,
                     cumulative_weight_distance=cumulative_weight_distance,
                     num_classes=num_classes,
+                    previous_weight_matrix=last_classifier_weight,
                 )
+
+                last_classifier_weight = weight_matrix.copy()
                 append_multiclass_csv_row(
                     csv_path=multiclass_csv_path,
                     epoch=epoch,
@@ -1678,5 +1682,29 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
 
     with open(run_dir / "summary.json", "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
+
+    # --- NEW CODE: Save dataset and models ---
+    
+    # 1. Save the dataset bundles so we can plot the exact same train/test points
+    np.savez(
+        run_dir / "dataset_bundle.npz",
+        train_inputs=dataset_bundle.train_inputs,
+        train_targets=dataset_bundle.train_targets,
+        test_inputs=dataset_bundle.test_inputs,
+        test_targets=dataset_bundle.test_targets
+    )
+
+    # 2. Save the model weights
+    if use_pytorch_cnn:
+        torch.save({
+            'torch_model': torch_model.state_dict(),
+            'classifier': classifier.state_dict()
+        }, run_dir / "model_weights.pt")
+    else:
+        # Save JAX parameters using standard pickle
+        with open(run_dir / "jax_params.pkl", "wb") as f:
+            pickle.dump(params, f)
+            
+    # -----------------------------------------
 
     return summary

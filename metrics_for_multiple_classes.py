@@ -79,6 +79,8 @@ class MultiClassEpochRaw:
     nc2_deflated_deviation: float
     nc1_ratio_deflated: float
     nc2_ratio_deflated: float
+    sensitive_param_fraction: float
+    mean_weight_step_distance: float
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +284,8 @@ def collect_multiclass_epoch(
     initial_weight_matrix: np.ndarray,
     cumulative_weight_distance: float,
     num_classes: int,
+    previous_weight_matrix: np.ndarray | None = None,
+    sensitivity_threshold: float = 1e-3,
 ) -> MultiClassEpochRaw:
     """Compute all multi-class metrics for one epoch in a single jitted call."""
     targets_np = np.asarray(targets, dtype=np.int64)
@@ -303,6 +307,24 @@ def collect_multiclass_epoch(
     weight_matrix_arr = jnp.asarray(weight_matrix, dtype=jnp.float32)
     initial_weight_matrix_arr = jnp.asarray(initial_weight_matrix, dtype=jnp.float32)
     cumulative_weight_distance_arr = jnp.asarray(cumulative_weight_distance, dtype=jnp.float32)
+
+    # --- Step-wise weight movement (this step vs. the previous recorded step) ---
+    # "Sensitive" parameters are ones whose weight moved by more than
+    # `sensitivity_threshold` since the last measurement; mean_weight_step_distance
+    # is the average |delta| across ALL parameters, which is expected to shrink
+    # as training converges (large early steps, near-zero later steps).
+    if previous_weight_matrix is None:
+        sensitive_param_fraction = float("nan")
+        mean_weight_step_distance = float("nan")
+    else:
+        previous_weights = np.asarray(previous_weight_matrix, dtype=np.float64)
+        if previous_weights.shape != weight_matrix.shape or weight_matrix.size == 0:
+            sensitive_param_fraction = float("nan")
+            mean_weight_step_distance = float("nan")
+        else:
+            step_abs_delta = np.abs(weight_matrix - previous_weights)
+            sensitive_param_fraction = float(np.mean(step_abs_delta > sensitivity_threshold))
+            mean_weight_step_distance = float(np.mean(step_abs_delta))
 
     result = _compute_multiclass_core(
         features,
@@ -332,6 +354,8 @@ def collect_multiclass_epoch(
         nc2_deflated_deviation=result["nc2_deflated"],
         nc1_ratio_deflated=result["nc1_ratio_deflated"],
         nc2_ratio_deflated=result["nc2_ratio_deflated"],
+        sensitive_param_fraction=sensitive_param_fraction,
+        mean_weight_step_distance=mean_weight_step_distance,
     )
 
 
@@ -354,6 +378,8 @@ _CSV_FIELDS: list[str] = [
     "nc2_deflated_deviation",
     "nc1_ratio_deflated",
     "nc2_ratio_deflated",
+    "sensitive_param_fraction",
+    "mean_weight_step_distance",
 ]
 
 
@@ -409,7 +435,7 @@ def finalize_multiclass_plots(
     steps = np.asarray([int(row["global_step"]) for row in rows], dtype=np.int64)
     cols = {name: np.asarray([row[name] for row in rows], dtype=np.float64) for name in _CSV_FIELDS}
 
-    fig, axes = plt.subplots(4, 2, figsize=(16, 20), sharex=True)
+    fig, axes = plt.subplots(5, 2, figsize=(16, 25), sharex=True)
 
     ax = axes[0, 0]
     ax.plot(steps, cols["condition_number"], linewidth=1.8, label="condition number", color="steelblue")
@@ -487,8 +513,22 @@ def finalize_multiclass_plots(
     ax.set_ylim(0.0, 1.02)
     ax.grid(True, alpha=0.3)
 
+    ax = axes[4, 0]
+    ax.plot(steps, cols["sensitive_param_fraction"], linewidth=1.8, color="darkorange")
+    ax.set_title("Sensitive Parameter Fraction (|delta| > threshold)")
+    ax.set_xlabel("Global Step")
+    ax.set_ylabel("Fraction of parameters")
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[4, 1]
+    ax.plot(steps, cols["mean_weight_step_distance"], linewidth=1.8, color="steelblue")
+    ax.set_title("Mean Weight Step Distance (mean over all class pairs)")
+    ax.set_xlabel("Global Step")
+    ax.set_ylabel("Distance")
+    ax.grid(True, alpha=0.3)
+
     if tpt_step >= 0:
-        for r in range(4):
+        for r in range(5):
             for c in range(2):
                 axes[r, c].axvline(tpt_step, color="black", linestyle="-", linewidth=2.0)
 
