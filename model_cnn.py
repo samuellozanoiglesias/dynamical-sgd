@@ -25,6 +25,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as models
+from torchvision.models.resnet import ResNet, BasicBlock
 import jax.numpy as jnp
 
 
@@ -42,6 +43,27 @@ def _make_hook(capture: "_FeatureCapture"):
         # identical to: features.value = input[0].clone()
         capture.value = input[0].clone()
     return hook
+
+class _NarrowResNet(ResNet):
+    """Backbone resnet18-family con dos palancas extra de capacidad:
+
+    - width_mult: escala el ancho (num. canales) de layer1..layer4. El stem
+      (conv1/bn1) se mantiene en 64 canales estándar, ya que
+      `build_cnn_model` ya re-cablea `conv1` usando
+      `resnet.conv1.weight.shape[0]` como referencia -- así el stem sigue
+      siendo consistente pase lo que pase con width_mult.
+    - blocks_per_stage: nº de BasicBlocks por etapa. (2,2,2,2) es el
+      resnet18 estándar; (1,1,1,1) es un "resnet10" más ligero.
+    """
+
+    def __init__(self, blocks_per_stage, num_classes: int, width_mult: float = 1.0):
+        self.width_mult = float(width_mult)
+        super().__init__(BasicBlock, list(blocks_per_stage), num_classes=num_classes)
+
+    def _make_layer(self, block, planes, blocks, stride=1, dilate=False):
+        scaled_planes = max(1, int(round(planes * self.width_mult)))
+        return super()._make_layer(block, scaled_planes, blocks, stride, dilate)
+
 
 
 class _TabularStem(nn.Module):
@@ -85,39 +107,67 @@ class _CNNWithStem(nn.Module):
             x = self.stem(x)
         return self.backbone(x)
 
-
 def build_cnn_model(
     num_classes: int,
     input_ch: int,
     device: torch.device,
     input_dim: int | None = None,
     stem_spatial_size: int = 8,
+    blocks_per_stage: tuple[int, int, int, int] = (2, 2, 2, 2),
+    num_stages: int = 4,
+    width_mult: float = 1.0,
 ):
-    """Unmodified core from neuralcollapse_(1).py:
+    """Extensión de build_cnn_model original con 3 knobs de capacidad,
+    todos opcionales y con defaults = comportamiento original (resnet18
+    completo: blocks (2,2,2,2), num_stages=4, width_mult=1.0):
 
-        model = models.resnet18(pretrained=False, num_classes=C)
-        model.conv1 = nn.Conv2d(input_ch, model.conv1.weight.shape[0], 3, 1, 1, bias=False)
-        model.maxpool = nn.MaxPool2d(kernel_size=1, stride=1, padding=0)
-        model = model.to(device)
-        classifier = model.fc
-        classifier.register_forward_hook(hook)
+      A) blocks_per_stage -- menos bloques por etapa (menos profundidad)
+      B) num_stages        -- elimina layer3/layer4 (etapas enteras) por cola
+      C) width_mult         -- escala el ancho (canales) de layer1..layer4
 
-    Extension: when `input_dim` is given (i.e. the dataset is flat feature
-    vectors like spiral/blobs/rings/checkerboard rather than an image), a
-    `_TabularStem` is inserted in front of the (still-unmodified) resnet to
-    project (N, input_dim) -> (N, input_ch, stem_spatial_size, stem_spatial_size).
-    For image datasets (MNIST etc.), pass input_dim=None and behavior is
-    identical to before.
+    Se pueden combinar libremente. El resto del pipeline (forward hook,
+    TorchModelAdapter, classifier_weight_matrix, etc.) no necesita ningún
+    cambio porque `.fc` sigue siendo addressable igual que antes.
     """
-    resnet = models.resnet18(pretrained=False, num_classes=num_classes)
+    if not (1 <= num_stages <= 4):
+        raise ValueError(f"num_stages debe estar en [1, 4], recibido {num_stages}")
+    if width_mult <= 0:
+        raise ValueError(f"width_mult debe ser > 0, recibido {width_mult}")
+    if len(blocks_per_stage) != 4:
+        raise ValueError("blocks_per_stage debe tener longitud 4 (una por etapa)")
+
+    # Si vamos a truncar etapas (num_stages < 4), no hace falta construir
+    # bloques reales para las etapas que luego se sustituirán por Identity.
+    effective_blocks = list(blocks_per_stage[:num_stages]) + [1] * (4 - num_stages)
+
+    resnet = _NarrowResNet(
+        blocks_per_stage=effective_blocks, num_classes=num_classes, width_mult=width_mult
+    )
     resnet.conv1 = nn.Conv2d(input_ch, resnet.conv1.weight.shape[0], 3, 1, 1, bias=False)
     resnet.maxpool = nn.MaxPool2d(kernel_size=1, stride=1, padding=0)
+
+    base_widths = [64, 128, 256, 512]  # anchos "canónicos" de layer1..layer4
+    for stage_idx in range(num_stages, 4):
+        setattr(resnet, f"layer{stage_idx + 1}", nn.Identity())
+    
+    # `_NarrowResNet._make_layer` scales every active stage's channel count by
+    # `width_mult`, but torchvision's `ResNet.__init__` hardcodes
+    # `self.fc = nn.Linear(512 * block.expansion, num_classes)`, unaware of that
+    # scaling. That mismatch is invisible whenever width_mult == 1.0 (the
+    # hardcoded value happens to be correct), but breaks for any other width_mult
+    # -- including the num_stages == 4 default case, not just the truncated-stage
+    # branch below. So we always rebuild `fc` from the real final width instead
+    # of only doing it when num_stages < 4.
+    
+    out_width = base_widths[num_stages - 1]
+    out_channels = max(1, int(round(out_width * width_mult)))  # BasicBlock.expansion == 1
+    resnet.fc = nn.Linear(out_channels, num_classes)
 
     stem = None
     if input_dim is not None:
         stem = _TabularStem(input_dim=input_dim, out_channels=input_ch, spatial_size=stem_spatial_size)
 
-    model = _CNNWithStem(resnet, stem).to(device)  # `resnet` positionally fills `backbone`
+    model = _CNNWithStem(resnet, stem).to(device)
 
     capture = _FeatureCapture()
     classifier = model.fc
@@ -479,15 +529,25 @@ class TorchModelAdapter:
         classifier: nn.Module,
         capture: _FeatureCapture,
         device: torch.device,
+        init_type: str = "pytorch_default",
     ):
         self.torch_model = torch_model
         self.classifier = classifier
         self.capture = capture
         self.device = device
+        # training_runner.py's summary dict reads `model.init_type`, mirroring
+        # the field JAXModel exposes (set from model_cfg["init_type"], e.g.
+        # "he"/"lecun"/...). The torch backbones here don't implement a
+        # configurable init scheme -- every Conv2d/Linear/BatchNorm2d layer is
+        # left at PyTorch's own default initialization -- so we record that
+        # fact honestly rather than leaving the attribute missing (which
+        # crashed the summary write) or copying the JAX config value in a way
+        # that would wrongly imply it was actually applied here.
+        self.init_type = init_type
 
     def apply(self, params, x, *, return_intermediates: bool = False):
         self.torch_model.eval()
-        x_np = np.asarray(x, dtype=np.float32)
+        x_np = np.array(x, dtype=np.float32)
         x_t = torch.as_tensor(x_np, device=self.device)
         with torch.no_grad():
             logits_t = self.torch_model(x_t)

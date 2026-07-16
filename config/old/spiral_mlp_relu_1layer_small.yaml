@@ -35,8 +35,8 @@ optimizer:
   momentum: 0.9
   optimizer_type: adam
 dynamics:
-  bumps_before_TPT: false
-  bumps_at_TPT: false
+  bumps_before_tpt: false
+  bumps_at_tpt: false
   period_length: 5000
   w_max: 1.0
   # Optional class order for bump focus (length must equal num_classes; duplicates allowed).

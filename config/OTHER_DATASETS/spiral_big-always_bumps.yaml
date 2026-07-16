@@ -1,19 +1,26 @@
 use_gpu: false
 
 data:
-  dataset_name: tiny_imagenet       # mnist, cifar10, cifar100, tiny_imagenet
+  dataset_name: spiral
   data_dir: ./data
-  label_mode: coarse            # cifar100 only: fine (100 classes) or coarse (20 superclasses)
-  num_classes: 200              # must match the dataset 
-  # (mnist=cifar10=10, cifar100=100 (or 20 in coarse mode), tiny_imagenet=200)
+  num_classes: 3
+  points_per_class: 100
+  revolutions: 4.0
+  noise_std: 0.2
+  min_radius: 0.01
+  random_seed: 0
+  # Optional explicit initial class angles in degrees.
+  # Keep null for homogeneous spacing; provide a list (length = num_classes)
+  # if you want different initial angles.
+  angular_offsets: null
 model:
-  architecture: mlp
+  architecture: mlp_relu
   init_type: glorot
   nn_width: 500
-  num_hidden_layers: 3
+  num_hidden_layers: 1
   use_bias: true
 training:
-  training_steps: 50000
+  training_steps: 250000
   save_metrics_every_n_steps: 50
   batch_size: 200
   random_seed: 42
@@ -24,32 +31,29 @@ optimizer:
   eps: 1.0e-08
   gradient_clipping: null
   l2_reg: 0.0
-  learning_rate: 0.001
+  learning_rate: 0.002
   momentum: 0.9
   optimizer_type: adam
 dynamics:
-  bumps_before_tpt: false
-  bumps_at_tpt: false
+  bumps_before_tpt: true
+  bumps_at_tpt: true
   period_length: 5000
   w_max: 70.0
   amplitude: 1.0
   # Optional class order for bump focus (length must equal num_classes; duplicates allowed).
   # Example: [1,0,1] repeats classes and can skip others.
-  bump_order: 
+  bump_order: [0,1,2]
   tpt_accuracy_threshold: 1.0
 analysis:
-  metric_subset_size: 5000
   plot_version: simplified
-  compute_results: average
   outputs:
-    classifier_metrics: false
+    classifier_metrics: true
     nc_metrics: false
     separability_metrics: false
     pca_analysis: false
-    pca_geometric: false
-    hyperplane_metrics: false
-    proj_nc_analysis: false
-    multiclass_metrics: true
+    pca_geometric: true
+    hyperplane_metrics: true
+    proj_nc_analysis: true
   pca:
     projected_dims: [1, 2, 3, 5]
 output:

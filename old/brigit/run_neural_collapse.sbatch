@@ -23,7 +23,7 @@ cd /mnt/lustre/home/samuloza/dynamical-sgd
 CONFIG_FILES=(nc_config_size_75.yaml nc_config_size_100.yaml nc_config_size_150.yaml nc_config_size_200.yaml nc_config_size_250.yaml)
 # CONFIG_FILES=("nc_config_baseline.yaml" "nc_config_big_nn.yaml"  "nc_config_super_big_nn.yaml" "nc_config_narrow_bump.yaml")
 
-MODE="all"  # Options: with_bumps_TPT, without_bumps_TPT, without_dynamics, with_dynamics, all
+MODE="all"  # Options: with_bumps_tpt, without_bumps_tpt, without_dynamics, with_dynamics, all
 CLUSTER="brigit"
 
 # Seeds for multiple runs (for statistics)
@@ -133,10 +133,10 @@ for SEED in "${SEEDS[@]}"; do
         
         if [ "$MODE" == "all" ]; then
             # Run all three experiments
-            MODES_TO_RUN=("with_bumps_TPT" "without_bumps_TPT" "without_dynamics")
+            MODES_TO_RUN=("with_bumps_tpt" "without_bumps_tpt" "without_dynamics")
         elif [ "$MODE" == "with_dynamics" ]; then
             # Run both TPT experiments (with and without bumps after 100% acc)
-            MODES_TO_RUN=("with_bumps_TPT" "without_bumps_TPT")
+            MODES_TO_RUN=("with_bumps_tpt" "without_bumps_tpt")
         else
             # Run the specified mode
             MODES_TO_RUN=("$MODE")

@@ -1,0 +1,59 @@
+use_gpu: true
+
+data:
+  dataset_name: cifar10       # or cifar100, tiny_imagenet
+  data_dir: ./data
+  label_mode: coarse            # cifar100 only: fine (100 classes) or coarse (20 superclasses)
+  num_classes: 10              # must match the dataset (10/100/20/200)
+
+model:
+  architecture: resnet18_cnn
+  cnn:
+    backbone: resnet18
+    resnet:
+      num_stages: 4
+      blocks_per_stage: [1, 1, 1, 1]   # "resnet10"
+      width_mult: 0.5
+
+training:
+  training_steps: 10000          # 350 × 20
+  save_metrics_every_n_steps: 1  # 1 checkpoint per "epoch" (=20 steps), matches original epoch cadence
+  batch_size: 128
+  random_seed: 42
+  loss: cross_entropy
+
+optimizer:
+  optimizer_type: sgd
+  learning_rate: 0.0679
+  momentum: 0.9
+  weight_decay: 5.0e-4
+  gradient_clipping: null
+  nesterov: false
+
+dynamics:
+  bumps_before_tpt: true
+  bumps_at_tpt: true
+  period_length: 200
+  w_max: 70.0
+  amplitude: 1.0
+  bump_order:
+  tpt_accuracy_threshold: 1.0
+
+analysis:
+  metric_subset_size: 5000
+  plot_version: simplified
+  compute_results: average
+  outputs:
+    classifier_metrics: false
+    nc_metrics: false
+    separability_metrics: false
+    pca_analysis: false
+    pca_geometric: false
+    hyperplane_metrics: false
+    proj_nc_analysis: false
+    multiclass_metrics: true
+  pca:
+    projected_dims: [1, 2, 3, 5]
+
+output:
+  output_dir: /data/samuel_lozano/dynamical-sgd

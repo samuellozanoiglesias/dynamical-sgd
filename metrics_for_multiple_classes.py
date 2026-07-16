@@ -6,11 +6,16 @@ This module computes, in a single jitted JAX program per epoch (no Python
 loop over classes or class pairs):
 
   * train_accuracy, test_accuracy               (global, not per-class)
-  * classifier condition_number, path_curvature_ratio
+  * classifier condition_number, path_curvature_ratio, weight_path_distance
+    (the cumulative distance the weights have traveled — the numerator of
+    path_curvature_ratio)
   * NC1, NC2 (mean |cos - ETF target| deviation)
   * avg_separation_margin                        (mean over all class pairs)
   * cyl_half_length_mean, cyl_radius_mean         (mean over all classes)
   * bhattacharyya_distance_mean                   (mean over all class pairs)
+  * pca_alignment_mean                            (mean |cos| between each
+    class's first-PC "cylinder axis" and every other class's, over all
+    class pairs)
   * nc1_deflated, nc2_deflated_deviation          (after removing each
     class's own first-PC "cylinder axis" — see projection_PCA_analysis.py
     for the un-vectorized reference implementation this mirrors)
@@ -24,10 +29,10 @@ Vectorization notes
   classes, then a single *batched* `jnp.linalg.eigh` call extracts every
   class's first principal component (cylinder axis) at once.
 - All-pairs quantities (NC2 cosine deviation, separation margin,
-  Bhattacharyya distance) are computed as full (C, C) matrices and reduced
-  with an upper-triangular mask, instead of iterating over `class_pairs`.
-  This means this module does NOT need a `class_pairs` list at all — every
-  unique pair is covered automatically and exactly once.
+  Bhattacharyya distance, PCA axis alignment) are computed as full (C, C)
+  matrices and reduced with an upper-triangular mask, instead of iterating
+  over `class_pairs`. This means this module does NOT need a `class_pairs`
+  list at all — every unique pair is covered automatically and exactly once.
 - The whole pipeline is wrapped in a single `jax.jit` (static on
   `num_classes`), so one call = one compiled program on the device.
 
@@ -62,12 +67,14 @@ REG_EPS = 1e-6
 class MultiClassEpochRaw:
     condition_number: float
     path_curvature_ratio: float
+    weight_path_distance: float
     nc1: float
     nc2_deviation: float
     avg_separation_margin: float
     cyl_half_length_mean: float
     cyl_radius_mean: float
     bhattacharyya_distance_mean: float
+    pca_alignment_mean: float
     nc1_deflated: float
     nc2_deflated_deviation: float
     nc1_ratio_deflated: float
@@ -197,9 +204,19 @@ def _compute_multiclass_core(
     rest_mean = jnp.mean(eigvals[:, :-1], axis=-1)
     radius = jnp.sqrt(jnp.clip(rest_mean, 0.0, None))
 
-    # ---- pairwise Bhattacharyya distance over all (C, C) pairs at once ----
+    # ---- pairwise quantities over all (C, C) pairs at once ----
     pair_mask = jnp.triu(jnp.ones((C, C), dtype=features.dtype), k=1)
     num_pairs = jnp.sum(pair_mask)
+
+    # Mean PCA axis alignment: |cos| between each pair of classes' first
+    # principal component ("cylinder axis"), averaged over all class pairs.
+    # `axis` rows are already unit-norm (eigenvectors from jnp.linalg.eigh),
+    # so the Gram matrix is directly the cosine matrix; clip defensively for
+    # floating-point drift before taking the absolute value.
+    axis_gram = axis @ axis.T                                         # (C, C)
+    axis_cos_mat = jnp.clip(axis_gram, -1.0, 1.0)
+    pca_alignment_mean = jnp.sum(pair_mask * jnp.abs(axis_cos_mat)) / (num_pairs + EPS)
+
     cov_avg = 0.5 * (cov[:, None] + cov[None, :])                      # (C, C, D, D)
     delta_mu = class_means[None, :, :] - class_means[:, None, :]       # (C, C, D)
 
@@ -236,12 +253,14 @@ def _compute_multiclass_core(
     return {
         "condition_number": condition_number,
         "path_curvature_ratio": path_curvature_ratio,
+        "weight_path_distance": cumulative_weight_distance,
         "nc1": nc1,
         "nc2": nc2,
         "avg_margin": avg_margin,
         "half_length_mean": jnp.mean(half_length),
         "radius_mean": jnp.mean(radius),
         "bhattacharyya_mean": bhattacharyya_mean,
+        "pca_alignment_mean": pca_alignment_mean,
         "nc1_deflated": nc1_defl,
         "nc2_deflated": nc2_defl,
         "nc1_ratio_deflated": nc1_ratio,
@@ -301,12 +320,14 @@ def collect_multiclass_epoch(
     return MultiClassEpochRaw(
         condition_number=result["condition_number"],
         path_curvature_ratio=result["path_curvature_ratio"],
+        weight_path_distance=result["weight_path_distance"],
         nc1=result["nc1"],
         nc2_deviation=result["nc2"],
         avg_separation_margin=result["avg_margin"],
         cyl_half_length_mean=result["half_length_mean"],
         cyl_radius_mean=result["radius_mean"],
         bhattacharyya_distance_mean=result["bhattacharyya_mean"],
+        pca_alignment_mean=result["pca_alignment_mean"],
         nc1_deflated=result["nc1_deflated"],
         nc2_deflated_deviation=result["nc2_deflated"],
         nc1_ratio_deflated=result["nc1_ratio_deflated"],
@@ -321,12 +342,14 @@ def collect_multiclass_epoch(
 _CSV_FIELDS: list[str] = [
     "condition_number",
     "path_curvature_ratio",
+    "weight_path_distance",
     "nc1",
     "nc2_deviation",
     "avg_separation_margin",
     "cyl_half_length_mean",
     "cyl_radius_mean",
     "bhattacharyya_distance_mean",
+    "pca_alignment_mean",
     "nc1_deflated",
     "nc2_deflated_deviation",
     "nc1_ratio_deflated",
@@ -396,10 +419,15 @@ def finalize_multiclass_plots(
     ax2 = ax.twinx()
     ax2.plot(steps, cols["path_curvature_ratio"], linewidth=1.4, color="darkorange", label="path curvature ratio")
     ax2.set_ylabel("Path curvature ratio")
-    ax.set_title("Classifier Condition Number & Path Curvature")
+    ax3 = ax.twinx()
+    ax3.spines["right"].set_position(("outward", 60))
+    ax3.plot(steps, cols["weight_path_distance"], linewidth=1.4, color="mediumseagreen", label="weight path distance")
+    ax3.set_ylabel("Cumulative weight path distance")
+    ax.set_title("Classifier Condition Number, Path Curvature & Weight Path Distance")
     lines1, labels1 = ax.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
-    ax.legend(lines1 + lines2, labels1 + labels2, fontsize=8)
+    lines3, labels3 = ax3.get_legend_handles_labels()
+    ax.legend(lines1 + lines2 + lines3, labels1 + labels2 + labels3, fontsize=8)
 
     ax = axes[0, 1]
     ax.plot(steps, cols["nc1"], linewidth=1.8, label="NC1 original", color="steelblue")
@@ -450,6 +478,14 @@ def finalize_multiclass_plots(
     ax.set_ylabel("Ratio")
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8)
+
+    ax = axes[3, 1]
+    ax.plot(steps, cols["pca_alignment_mean"], linewidth=1.8, color="darkred")
+    ax.set_title("Mean PCA Axis Alignment (mean |cos| over all class pairs)")
+    ax.set_xlabel("Global Step")
+    ax.set_ylabel("Mean |cos(axis_i, axis_j)|")
+    ax.set_ylim(0.0, 1.02)
+    ax.grid(True, alpha=0.3)
 
     if tpt_step >= 0:
         for r in range(4):

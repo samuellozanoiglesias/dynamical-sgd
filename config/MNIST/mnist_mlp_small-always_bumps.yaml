@@ -1,21 +1,20 @@
 use_gpu: false
 
 data:
-  dataset_name: tiny_imagenet       # mnist, cifar10, cifar100, tiny_imagenet
+  dataset_name: mnist
   data_dir: ./data
-  label_mode: coarse            # cifar100 only: fine (100 classes) or coarse (20 superclasses)
-  num_classes: 200              # must match the dataset 
-  # (mnist=cifar10=10, cifar100=100 (or 20 in coarse mode), tiny_imagenet=200)
+  num_classes: 10
+  random_seed: 0
 model:
   architecture: mlp
   init_type: glorot
-  nn_width: 500
-  num_hidden_layers: 3
+  nn_width: 10
+  num_hidden_layers: 1
   use_bias: true
 training:
-  training_steps: 50000
-  save_metrics_every_n_steps: 50
-  batch_size: 200
+  training_steps: 1500
+  save_metrics_every_n_steps: 1
+  batch_size: 50
   random_seed: 42
   loss: cross_entropy
 optimizer:
@@ -28,9 +27,9 @@ optimizer:
   momentum: 0.9
   optimizer_type: adam
 dynamics:
-  bumps_before_tpt: false
-  bumps_at_tpt: false
-  period_length: 5000
+  bumps_before_tpt: true
+  bumps_at_tpt: true
+  period_length: 10
   w_max: 70.0
   amplitude: 1.0
   # Optional class order for bump focus (length must equal num_classes; duplicates allowed).

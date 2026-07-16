@@ -35,8 +35,8 @@ optimizer:
   momentum: 0.9
   optimizer_type: adam
 dynamics:
-  bumps_before_TPT: false
-  bumps_at_TPT: false
+  bumps_before_tpt: false
+  bumps_at_tpt: false
   period_length: 5000
   w_max: 70.0
   amplitude: 1.0
@@ -47,12 +47,12 @@ dynamics:
 analysis:
   plot_version: simplified
   outputs:
-    classifier_metrics: false
+    classifier_metrics: true
     nc_metrics: false
     separability_metrics: false
     pca_analysis: false
-    pca_geometric: false
-    hyperplane_metrics: false
+    pca_geometric: true
+    hyperplane_metrics: true
     proj_nc_analysis: true
   pca:
     projected_dims: [1, 2, 3, 5]

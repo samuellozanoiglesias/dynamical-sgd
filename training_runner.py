@@ -959,10 +959,20 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
             input_dim = None
 
         if backbone_name == "resnet18":
+            resnet_cfg = cnn_cfg.get("resnet", {}) or {}
+            blocks_per_stage = tuple(
+                int(b) for b in resnet_cfg.get("blocks_per_stage", [2, 2, 2, 2])
+            )
+            num_stages = int(resnet_cfg.get("num_stages", 4))
+            width_mult = float(resnet_cfg.get("width_mult", 1.0))
+        
             torch_model, classifier, feature_capture = build_cnn_model(
                 num_classes=num_classes, input_ch=input_ch, device=torch_device,
                 input_dim=input_dim,
                 stem_spatial_size=int(cnn_cfg.get("stem_spatial_size", 8)),
+                blocks_per_stage=blocks_per_stage,
+                num_stages=num_stages,
+                width_mult=width_mult,
             )
         elif backbone_name == "simple_cnn":
             fc_hidden_dim_raw = cnn_cfg.get("fc_hidden_dim")
@@ -982,7 +992,7 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
                 f"Unknown model.cnn.backbone '{backbone_name}'. Expected 'resnet18' or 'simple_cnn'."
             )
         initial_classifier_weight = (classifier.weight.detach().cpu().clone().numpy())
-        model = TorchModelAdapter(torch_model, classifier, feature_capture, torch_device)
+        model = TorchModelAdapter(torch_model, classifier, feature_capture, torch_device, init_type=str(model_cfg.get("init_type", "pytorch_default")),)
         params = None
         initial_params = None
         cumulative_weight_distance = 0.0

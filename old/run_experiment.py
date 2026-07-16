@@ -125,11 +125,11 @@ def build_notebook_env(config: Dict[str, Any], output_dir: Path) -> Dict[str, st
     env["NC_TOTAL_TRAINING_STEPS"] = str(total_steps)
     env["NC_BATCH_SIZE"] = str(to_int(training_cfg.get("batch_size", 128), 128))
 
-    env["NC_BUMPS_BEFORE_TPT"] = bool_to_env(dynamics_cfg.get("bumps_before_TPT"), True)
-    env["NC_BUMPS_AT_TPT"] = bool_to_env(dynamics_cfg.get("bumps_at_TPT"), False)
+    env["NC_BUMPS_BEFORE_tpt"] = bool_to_env(dynamics_cfg.get("bumps_before_tpt"), True)
+    env["NC_BUMPS_AT_tpt"] = bool_to_env(dynamics_cfg.get("bumps_at_tpt"), False)
     env["NC_PERIOD_LENGTH"] = str(to_int(dynamics_cfg.get("period_length", 2000), 2000))
     env["NC_W_MAX"] = str(to_float(dynamics_cfg.get("w_max", 50.0), 50.0))
-    env["NC_TPT_ACCURACY_THRESHOLD"] = str(to_float(dynamics_cfg.get("tpt_accuracy_threshold", 1.0), 1.0))
+    env["NC_tpt_ACCURACY_THRESHOLD"] = str(to_float(dynamics_cfg.get("tpt_accuracy_threshold", 1.0), 1.0))
 
     env["NC_MODEL_ARCHITECTURE"] = architecture
     env["NC_MLP_HIDDEN_DIM"] = str(to_int(model_cfg.get("nn_width", 512), 512))
@@ -315,8 +315,8 @@ def main() -> None:
             f"output.experiment_name={experiment_name}",
             f"output.config_name={config_name}",
             f"output.experiment_timestamp={experiment_timestamp}",
-            f"dynamics.bumps_before_TPT={'true' if bumps_before else 'false'}",
-            f"dynamics.bumps_at_TPT={'true' if bumps_after else 'false'}",
+            f"dynamics.bumps_before_tpt={'true' if bumps_before else 'false'}",
+            f"dynamics.bumps_at_tpt={'true' if bumps_after else 'false'}",
         ]
         if args.seed is not None:
             mode_overrides.append(f"training.random_seed={args.seed}")

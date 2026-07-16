@@ -30,8 +30,8 @@ training:
 
 # Dynamics configuration
 dynamics:
-  bumps_before_TPT: true
-  bumps_at_TPT: false
+  bumps_before_tpt: true
+  bumps_at_tpt: false
   period_length: 500
   w_max: 50.0
   tpt_accuracy_threshold: 1.0

@@ -13,15 +13,15 @@ The script reads data from:
 
 Usage:
     python generate_averaged_figures.py --cluster brigit --mode nc_without_dynamics --config super_big_nn
-    python generate_averaged_figures.py --cluster brigit --mode nc_with_bumps_TPT --config baseline
-    python generate_averaged_figures.py --cluster brigit --mode nc_without_bumps_TPT  # Process all configs
+    python generate_averaged_figures.py --cluster brigit --mode nc_with_bumps_tpt --config baseline
+    python generate_averaged_figures.py --cluster brigit --mode nc_without_bumps_tpt  # Process all configs
     
 Examples:
     # Process specific config
     python generate_averaged_figures.py --cluster brigit --mode nc_without_dynamics --config super_big_nn --save_csv
     
     # Process all configs in a mode
-    python generate_averaged_figures.py --cluster brigit --mode nc_with_bumps_TPT --save_csv
+    python generate_averaged_figures.py --cluster brigit --mode nc_with_bumps_tpt --save_csv
 """
 
 import argparse
@@ -993,7 +993,7 @@ def main():
         '--mode',
         type=str,
         required=True,
-        help='Experiment mode: nc_with_bumps_TPT, nc_without_bumps_TPT, or nc_without_dynamics'
+        help='Experiment mode: nc_with_bumps_tpt, nc_without_bumps_tpt, or nc_without_dynamics'
     )
     
     parser.add_argument(

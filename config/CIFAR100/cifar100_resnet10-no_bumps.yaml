@@ -1,16 +1,22 @@
 use_gpu: true
 
 data:
-  dataset_name: tiny_imagenet       # or cifar100, tiny_imagenet
+  dataset_name: cifar100       # or cifar100, tiny_imagenet
   data_dir: ./data
-  label_mode: coarse            # cifar100 only: fine (100 classes) or coarse (20 superclasses)
-  num_classes: 200              # must match the dataset (10/100/20/200)
+  label_mode: fine            # cifar100 only: fine (100 classes) or coarse (20 superclasses)
+  num_classes: 100              # must match the dataset (10/100/20/200)
 
 model:
   architecture: resnet18_cnn
+  cnn:
+    backbone: resnet18
+    resnet:
+      num_stages: 4
+      blocks_per_stage: [1, 1, 1, 1]
+      width_mult: 0.5
 
 training:
-  training_steps: 7000          # 350 × 20
+  training_steps: 10000          # 350 × 20
   save_metrics_every_n_steps: 1  # 1 checkpoint per "epoch" (=20 steps), matches original epoch cadence
   batch_size: 128
   random_seed: 42

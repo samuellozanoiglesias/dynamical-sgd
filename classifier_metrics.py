@@ -29,6 +29,8 @@ class ClassifierAdvancedRaw:
     stable_rank: float
     path_curvature_ratio: float
     gsnr_by_class: np.ndarray
+    sensitive_param_fraction: float
+    mean_weight_step_distance: float
 
 
 def _flatten_features(x: np.ndarray) -> np.ndarray:
@@ -120,6 +122,8 @@ def collect_advanced_classifier_metrics(
     targets: np.ndarray,
     grads: np.ndarray | None,
     eps: float = EPS,
+    previous_weight_matrix: np.ndarray | None = None,
+    sensitivity_threshold: float = 1e-3,
 ) -> ClassifierAdvancedRaw:
     logits_arr = np.asarray(logits, dtype=np.float64)
     targets_arr = np.asarray(targets, dtype=np.int64)
@@ -182,6 +186,24 @@ def collect_advanced_classifier_metrics(
                     var_grad = np.var(class_grads, axis=0)
                     gsnr_by_class[class_id] = float(np.mean(np.square(mean_grad) / (var_grad + eps)))
 
+    # --- Step-wise weight movement (this step vs. the previous recorded step) ---
+    # "Sensitive" parameters are ones whose weight moved by more than
+    # `sensitivity_threshold` since the last measurement; mean_weight_step_distance
+    # is the average |delta| across ALL parameters, which is expected to shrink
+    # as training converges (large early steps, near-zero later steps).
+    if previous_weight_matrix is None:
+        sensitive_param_fraction = float("nan")
+        mean_weight_step_distance = float("nan")
+    else:
+        previous_weights = np.asarray(previous_weight_matrix, dtype=np.float64)
+        if previous_weights.shape != weights.shape or weights.size == 0:
+            sensitive_param_fraction = float("nan")
+            mean_weight_step_distance = float("nan")
+        else:
+            step_abs_delta = np.abs(weights - previous_weights)
+            sensitive_param_fraction = float(np.mean(step_abs_delta > sensitivity_threshold))
+            mean_weight_step_distance = float(np.mean(step_abs_delta))
+
     return ClassifierAdvancedRaw(
         correct_logit_mean_by_class=correct_logit_mean,
         max_wrong_logit_mean_by_class=max_wrong_logit_mean,
@@ -189,6 +211,8 @@ def collect_advanced_classifier_metrics(
         stable_rank=stable_rank,
         path_curvature_ratio=path_curvature_ratio,
         gsnr_by_class=gsnr_by_class,
+        sensitive_param_fraction=sensitive_param_fraction,
+        mean_weight_step_distance=mean_weight_step_distance,
     )
 
 
@@ -203,6 +227,8 @@ def initialize_classifier_csv(csv_path: Path, num_classes: int) -> None:
     header.append("weight_orthogonality")
     header.append("stable_rank")
     header.append("path_curvature_ratio")
+    header.append("sensitive_param_fraction")
+    header.append("mean_weight_step_distance")
     header.extend([f"gsnr_class_{class_id}" for class_id in range(num_classes)])
 
     with open(csv_path, "w", encoding="utf-8", newline="") as f:
@@ -230,6 +256,8 @@ def append_classifier_csv_row(
         weight_orthogonality = float("nan")
         stable_rank = float("nan")
         path_curvature_ratio = float("nan")
+        sensitive_param_fraction = float("nan")
+        mean_weight_step_distance = float("nan")
         gsnr = [float("nan")] * num_classes
     else:
         correct_logit = advanced_raw.correct_logit_mean_by_class[:num_classes].tolist()
@@ -237,6 +265,8 @@ def append_classifier_csv_row(
         weight_orthogonality = float(advanced_raw.weight_orthogonality)
         stable_rank = float(advanced_raw.stable_rank)
         path_curvature_ratio = float(advanced_raw.path_curvature_ratio)
+        sensitive_param_fraction = float(advanced_raw.sensitive_param_fraction)
+        mean_weight_step_distance = float(advanced_raw.mean_weight_step_distance)
         gsnr = advanced_raw.gsnr_by_class[:num_classes].tolist()
 
     row.extend(correct_logit)
@@ -244,6 +274,8 @@ def append_classifier_csv_row(
     row.append(weight_orthogonality)
     row.append(stable_rank)
     row.append(path_curvature_ratio)
+    row.append(sensitive_param_fraction)
+    row.append(mean_weight_step_distance)
     row.extend(gsnr)
 
     with open(csv_path, "a", encoding="utf-8", newline="") as f:
@@ -491,12 +523,20 @@ def finalize_classifier_dashboard(
         [row.get("path_curvature_ratio", float("nan")) for row in rows],
         dtype=np.float64,
     )
+    sensitive_param_fraction = np.asarray(
+        [row.get("sensitive_param_fraction", float("nan")) for row in rows],
+        dtype=np.float64,
+    )
+    mean_weight_step_distance = np.asarray(
+        [row.get("mean_weight_step_distance", float("nan")) for row in rows],
+        dtype=np.float64,
+    )
     gsnr = np.asarray(
         [[row.get(f"gsnr_class_{class_id}", float("nan")) for class_id in range(num_classes)] for row in rows],
         dtype=np.float64,
     )
 
-    fig, axes = plt.subplots(4, 2, figsize=(16, 22), sharex=True)
+    fig, axes = plt.subplots(5, 2, figsize=(16, 27), sharex=True)
 
     ax = axes[0, 0]
     for class_id in range(num_classes):
@@ -561,6 +601,22 @@ def finalize_classifier_dashboard(
         ax.legend(fontsize=7, ncol=2)
 
     ax = axes[3, 0]
+    ax.plot(steps, sensitive_param_fraction, linewidth=1.8, color="tab:red")
+    ax.set_title("Sensitive Parameter Fraction")
+    ax.set_xlabel("Global Step")
+    ax.set_ylabel("Fraction with |Δw| > threshold")
+    ax.set_ylim(-0.02, 1.02)
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[3, 1]
+    ax.plot(steps, mean_weight_step_distance, linewidth=1.8, color="tab:purple")
+    ax.set_title("Mean Weight Step Distance")
+    ax.set_xlabel("Global Step")
+    ax.set_ylabel("Mean |Δw| over all parameters")
+    ax.set_yscale("log")
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[4, 0]
     for class_id in range(num_classes):
         ax.plot(steps, alignment[:, class_id], linewidth=1.6, label=f"class {class_id}")
     ax.set_title("Weight-Mean Alignment")
@@ -571,7 +627,7 @@ def finalize_classifier_dashboard(
     if num_classes <= 12:
         ax.legend(fontsize=7, ncol=2)
 
-    ax = axes[3, 1]
+    ax = axes[4, 1]
     ax.plot(steps, condition_number, linewidth=1.8, label="condition number")
     ax.set_title("Classifier Condition Number")
     ax.set_xlabel("Global Step")

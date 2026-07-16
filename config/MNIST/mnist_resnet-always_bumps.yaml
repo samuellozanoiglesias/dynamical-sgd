@@ -8,9 +8,15 @@ data:
 
 model:
   architecture: resnet18_cnn
+  cnn:
+    backbone: resnet18
+    resnet:
+      num_stages: 2       # solo layer1 y layer2
+      width_mult: 0.25     # canales al 25%
+      blocks_per_stage: [2, 2, 2, 2]  # ignorado más allá de num_stages
 
 training:
-  training_steps: 7000          # 350 × 20
+  training_steps: 500          # 350 × 20
   save_metrics_every_n_steps: 1  # 1 checkpoint per "epoch" (=20 steps), matches original epoch cadence
   batch_size: 128
   random_seed: 42
@@ -27,7 +33,7 @@ optimizer:
 dynamics:
   bumps_before_tpt: true
   bumps_at_tpt: true
-  period_length: 100
+  period_length: 10
   w_max: 70.0
   amplitude: 1.0
   bump_order:

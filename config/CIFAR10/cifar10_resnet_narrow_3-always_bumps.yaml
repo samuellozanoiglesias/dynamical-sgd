@@ -7,24 +7,16 @@ data:
   num_classes: 10              # must match the dataset (10/100/20/200)
 
 model:
-  architecture: cnn        # new generic entry point ("resnet18_cnn" still works, unchanged)
+  architecture: resnet18_cnn
   cnn:
-    backbone: simple_cnn    # "simple_cnn" or "resnet18"
-
-    # --- simple_cnn options ---
-    channels: [8, 16]       # one conv block per entry; width = channel count
-    kernel_size: 3            # conv kernel size (padding = kernel_size // 2, same spatial size)
-    use_batchnorm: true       # BatchNorm2d after each conv
-    pool_every_block: true    # 2x2 maxpool after each block (halves spatial size each time)
-    dropout: 0.1              # dropout before the final classifier layer
-    fc_hidden_dim: 32       # optional FC hidden layer between pooled features and classifier
-
-    # --- shared by both backbones, only used for tabular datasets (spiral, blobs, rings, ...) ---
-    stem_spatial_size: 12     # tabular inputs get projected to (stem_channels, S, S) before conv
-    stem_channels: 1          # channels the stem projects into (simple_cnn only; resnet18 path keeps 1)
+    backbone: resnet18
+    resnet:
+      num_stages: 3
+      blocks_per_stage: [1, 1, 1, 1]   # "resnet10"
+      width_mult: 0.15
 
 training:
-  training_steps: 7000          # 350 × 20
+  training_steps: 10000          # 350 × 20
   save_metrics_every_n_steps: 1  # 1 checkpoint per "epoch" (=20 steps), matches original epoch cadence
   batch_size: 128
   random_seed: 42
@@ -39,9 +31,9 @@ optimizer:
   nesterov: false
 
 dynamics:
-  bumps_before_tpt: false
-  bumps_at_tpt: false
-  period_length: 100
+  bumps_before_tpt: true
+  bumps_at_tpt: true
+  period_length: 200
   w_max: 70.0
   amplitude: 1.0
   bump_order:

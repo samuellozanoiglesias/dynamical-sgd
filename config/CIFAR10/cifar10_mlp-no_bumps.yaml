@@ -9,10 +9,10 @@ model:
   architecture: mlp
   init_type: glorot
   nn_width: 500
-  num_hidden_layers: 3
+  num_hidden_layers: 2
   use_bias: true
 training:
-  training_steps: 50000
+  training_steps: 20000
   save_metrics_every_n_steps: 50
   batch_size: 200
   random_seed: 42
@@ -29,7 +29,7 @@ optimizer:
 dynamics:
   bumps_before_tpt: false
   bumps_at_tpt: false
-  period_length: 5000
+  period_length: 500
   w_max: 70.0
   amplitude: 1.0
   # Optional class order for bump focus (length must equal num_classes; duplicates allowed).

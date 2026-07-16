@@ -3,13 +3,13 @@ use_gpu: false
 data:
   dataset_name: cifar100       # or cifar100, tiny_imagenet
   data_dir: ./data
-  label_mode: fine            # cifar100 only: fine (100 classes) or coarse (20 superclasses)
-  num_classes: 100              # must match the dataset (10/100/20/200)
+  label_mode: coarse            # cifar100 only: fine (100 classes) or coarse (20 superclasses)
+  num_classes: 20              # must match the dataset (10/100/20/200)
 model:
   architecture: mlp
   init_type: glorot
   nn_width: 500
-  num_hidden_layers: 3
+  num_hidden_layers: 2
   use_bias: true
 training:
   training_steps: 50000
@@ -29,7 +29,7 @@ optimizer:
 dynamics:
   bumps_before_tpt: false
   bumps_at_tpt: false
-  period_length: 5000
+  period_length: 200
   w_max: 70.0
   amplitude: 1.0
   # Optional class order for bump focus (length must equal num_classes; duplicates allowed).

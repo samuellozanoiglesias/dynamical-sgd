@@ -26,9 +26,11 @@ cd /mnt/lustre/home/samuloza/dynamical-sgd/
 # handles auto-detection. You can change '--mode all' to 'single' or a specific 
 # configuration as outlined in your Python file's docstring.
 
-echo "Starting training job..."
+config_file="config/OTHER_DATASETS/spiral_big-always_bumps.yaml"
+
+echo "Starting training job with configuration: $config_file"
 python launch.py \
-    --config config/tiny_imagenet_mlp-no_bumps.yaml \
+    --config $config_file \
     --override use_gpu=true \
     --override data.data_dir=/mnt/lustre/home/samuloza/dynamical-sgd/data \
     --override output.output_dir=/mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd

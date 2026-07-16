@@ -277,8 +277,8 @@ def main() -> None:
         cfg.setdefault("output", {})
 
         if bumps_before is not None and bumps_after is not None:
-            cfg["dynamics"]["bumps_before_TPT"] = bool(bumps_before)
-            cfg["dynamics"]["bumps_at_TPT"] = bool(bumps_after)
+            cfg["dynamics"]["bumps_before_tpt"] = bool(bumps_before)
+            cfg["dynamics"]["bumps_at_tpt"] = bool(bumps_after)
 
         inferred_experiment_name = _infer_experiment_name(cfg["dynamics"])
         cfg["output"]["experiment_name"] = inferred_experiment_name
@@ -294,8 +294,8 @@ def main() -> None:
         print(f"Output: {run_dir}")
         print(
             "Dynamics: "
-            f"bumps_before_TPT={cfg['dynamics'].get('bumps_before_TPT', False)} | "
-            f"bumps_at_TPT={cfg['dynamics'].get('bumps_at_TPT', False)}"
+            f"bumps_before_tpt={cfg['dynamics'].get('bumps_before_tpt', False)} | "
+            f"bumps_at_tpt={cfg['dynamics'].get('bumps_at_tpt', False)}"
         )
         print("-" * 90)
 
