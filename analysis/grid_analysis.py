@@ -4,7 +4,7 @@ grid_analysis.py
 =================
 Builds gridmaps (heatmaps) for every metric produced by
 `metrics_for_multiple_classes.py`, comparing the two swept hyperparameters
-from the `gridsearch_widths_periods.sbatch` sweep:
+from the `gridsearch_wmaxs_periods.sbatch` sweep:
 
     x-axis -> dynamics.w_max        ("w", bump width)
     y-axis -> dynamics.period_length ("T", bump period)
@@ -47,16 +47,16 @@ run dir the same way and merged into the same gridmaps / summary CSV.
 Usage
 -----
     python grid_analysis.py \\
-        --base-dir /path/to/gridsearch_widths_periods \\
+        --base-dir /path/to/gridsearch_wmaxs_periods \\
         --config-name cifar10_resnet10-always_bumps \\
         --without-bumps-dir /path/to/without_bumps_run_output_dir \\
-        --widths 5 10 20 50 70 100 150 250 \\
+        --wmaxs 5 10 20 50 70 100 150 250 \\
         --periods 5 10 20 50 100 200 400 800 \\
-        --output-dir /path/to/gridsearch_widths_periods/grid_analysis
+        --output-dir /path/to/gridsearch_wmaxs_periods/grid_analysis
 
 Example:
 nohup python grid_analysis.py \
-    --base-dir /mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/gridsearch_widths_periods \
+    --base-dir /mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/gridsearch_wmaxs_periods \
     --config-name cifar10_resnet10-always_bumps \
     > log_grid_analysis.out 2>&1 &
 """
@@ -495,19 +495,19 @@ def main() -> None:
     parser.add_argument(
         "--base-dir",
         type=str,
-        default="/mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/gridsearch_widths_periods",
+        default="/mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/gridsearch_wmaxs_periods",
         help="BASE_OUTPUT_DIR used by the sbatch script (contains one w{W}_p{P} subfolder per combo).",
     )
     parser.add_argument(
         "--config-name",
         type=str,
-        default="cifar10_resnet10-always_bumps",
+        default="cifar10_resnet_narrow-always_bumps",
         help="Stem of the config file used for the sweep (output.config_name).",
     )
     parser.add_argument(
-        "--widths", type=int, nargs="+",
-        default=[5, 10, 20, 50, 70, 100, 150, 250],
-        help="WIDTHS array from the sbatch script (dynamics.w_max values).",
+        "--wmaxs", type=int, nargs="+",
+        default=[5, 10, 20, 50, 70, 100, 120, 150, 180, 200, 250, 300, 350, 400, 450, 500],
+        help="WMAXS array from the sbatch script (dynamics.w_max values).",
     )
     parser.add_argument(
         "--periods", type=int, nargs="+",

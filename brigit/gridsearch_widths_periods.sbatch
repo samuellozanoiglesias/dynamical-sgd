@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=gridsearch_widths_periods
+#SBATCH --job-name=gridsearch_wmaxs_periods
 #SBATCH --time=30-00:00:00
 #SBATCH --partition=gpu
 #SBATCH --qos=qos_gpu_long
@@ -16,20 +16,20 @@ source ~/.bashrc
 conda activate dynamical-sgd
 cd /mnt/lustre/home/samuloza/dynamical-sgd/
 
-config_file="config/MNIST/mnist_mlp-always_bumps.yaml"
-BASE_OUTPUT_DIR=/mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/gridsearch_widths_periods
+config_file="config/CIFAR10/cifar10_resnet_narrow-always_bumps.yaml"
+BASE_OUTPUT_DIR=/mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/gridsearch_wmaxs_periods
 mkdir -p "$BASE_OUTPUT_DIR"
 
 # ==========================================
 # Grid definition — edit these
 # ==========================================
-WIDTHS=(5 10 20 50 70 100 150 250)        # -> dynamics.w_max
+W_MAXS=(120 180 200 300 350 400 450 500)        # -> dynamics.w_max
 PERIODS=(5 10 20 50 100 200 400 800 1000 1200 1500 1800 2000)     # -> dynamics.period_length
 
 # ==========================================
 # Concurrency — set this from probe_gpu_parallelism.sbatch results
 # ==========================================
-MAX_PARALLEL=18
+MAX_PARALLEL=16
 
 # ==========================================
 # JAX memory behavior
@@ -47,13 +47,13 @@ echo "Per-process GPU memory fraction cap: ${XLA_PYTHON_CLIENT_MEM_FRACTION}"
 # Build the combination list
 # ==========================================
 combos=()
-for W in "${WIDTHS[@]}"; do
+for W in "${W_MAXS[@]}"; do
     for P in "${PERIODS[@]}"; do
         combos+=("${W}:${P}")
     done
 done
 
-echo "Total combinations: ${#combos[@]}  (${#WIDTHS[@]} widths x ${#PERIODS[@]} periods)"
+echo "Total combinations: ${#combos[@]}  (${#W_MAXS[@]} w_maxs x ${#PERIODS[@]} periods)"
 echo "Running with MAX_PARALLEL=${MAX_PARALLEL}"
 
 run_one () {
