@@ -23,8 +23,8 @@ mkdir -p "$BASE_OUTPUT_DIR"
 # ==========================================
 # Grid definition — edit these
 # ==========================================
-W_MAXS=(120 180 200 300 350 400 450 500)        # -> dynamics.w_max
-PERIODS=(5 10 20 50 100 200 400 800 1000 1200 1500 1800 2000)     # -> dynamics.period_length
+W_MAXS=(5 10 20 50 70 100 120 150 180 250 300 350 400 450 500)        # -> dynamics.w_max
+PERIODS=(4)     # -> dynamics.period_length
 
 # ==========================================
 # Concurrency — set this from probe_gpu_parallelism.sbatch results

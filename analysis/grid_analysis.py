@@ -9,7 +9,7 @@ from the `gridsearch_wmaxs_periods.sbatch` sweep:
     x-axis -> dynamics.w_max        ("w", bump width)
     y-axis -> dynamics.period_length ("T", bump period)
 
-It also adds a fake "w=1" column (leftmost, since real widths start at 5)
+It also adds a fake "w=1" column (leftmost, since real wmaxs start at 5)
 that is filled with the metrics of a separate `without_bumps` run, repeated
 identically for every T row (there is no period dependency when there are
 no bumps at all).
@@ -132,7 +132,7 @@ def resolve_training_dir(
     Unlike a blind recursive search, this explicitly narrows down to the
     `experiment_name` and/or `config_name` subfolder *by name* before looking
     for training_* dirs. This matters because sibling folders under `root`
-    (e.g. other model variants sharing the same widths/periods sweep dir)
+    (e.g. other model variants sharing the same wmaxs/periods sweep dir)
     can contain their own training_* dirs with a different config_name — if
     the requested config_name folder isn't found, this returns "not found"
     rather than silently falling back to a sibling folder's run.
@@ -304,10 +304,10 @@ def _collect_run_values(
 
 @dataclass
 class GridResult:
-    widths: list[int]
+    wmaxs: list[int]
     periods: list[int]
     x_labels: list[str]
-    grids: dict[str, np.ndarray]  # metric -> (n_periods, n_widths_plus_one)
+    grids: dict[str, np.ndarray]  # metric -> (n_periods, n_wmaxs_plus_one)
     missing: list[str] = field(default_factory=list)
     n_found: int = 0
     n_total: int = 0
@@ -316,7 +316,7 @@ class GridResult:
 def build_grids(
     base_dir: Path,
     config_name: str,
-    widths: list[int],
+    wmaxs: list[int],
     periods: list[int],
     experiment_name: Optional[str],
     csv_name: Optional[str],
@@ -325,10 +325,10 @@ def build_grids(
     without_bumps_config_name: Optional[str],
     without_bumps_experiment_name: Optional[str],
 ) -> GridResult:
-    sorted_widths = sorted(widths)
+    sorted_wmaxs = sorted(wmaxs)
     sorted_periods = sorted(periods)
     n_rows = len(sorted_periods)
-    n_cols = len(sorted_widths) + 1  # +1 for the fake without_bumps column
+    n_cols = len(sorted_wmaxs) + 1  # +1 for the fake without_bumps column
 
     grids = {m: np.full((n_rows, n_cols), np.nan) for m in ALL_METRIC_FIELDS}
     missing: list[str] = []
@@ -356,9 +356,9 @@ def build_grids(
 
     # ---- swept combos ----
     seen_experiment_names: set[str] = set()
-    n_total = len(sorted_widths) * len(sorted_periods)
+    n_total = len(sorted_wmaxs) * len(sorted_periods)
     n_found = 0
-    for j, w in enumerate(sorted_widths, start=1):
+    for j, w in enumerate(sorted_wmaxs, start=1):
         for i, p in enumerate(sorted_periods):
             combo_dir = base_dir / f"w{w}_p{p}"
             run_dir, used_exp = resolve_training_dir(combo_dir, config_name, experiment_name)
@@ -383,9 +383,9 @@ def build_grids(
             file=sys.stderr,
         )
 
-    x_labels = [WITHOUT_BUMPS_LABEL] + [str(w) for w in sorted_widths]
+    x_labels = [WITHOUT_BUMPS_LABEL] + [str(w) for w in sorted_wmaxs]
     return GridResult(
-        widths=sorted_widths,
+        wmaxs=sorted_wmaxs,
         periods=sorted_periods,
         n_found=n_found,
         n_total=n_total,
@@ -478,7 +478,7 @@ def save_summary_csv(result: GridResult, output_dir: Path) -> None:
         writer = csv.writer(f)
         writer.writerow(["metric", "w_max", "period_length", "value"])
         for metric, grid in result.grids.items():
-            for j, w_label in enumerate(["1_without_bumps"] + [str(w) for w in result.widths]):
+            for j, w_label in enumerate(["1_without_bumps"] + [str(w) for w in result.wmaxs]):
                 for i, p in enumerate(result.periods):
                     writer.writerow([metric, w_label, p, grid[i, j]])
     print(f"Summary CSV written to {path}")
@@ -490,7 +490,7 @@ def save_summary_csv(result: GridResult, output_dir: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Build w vs T gridmaps for every metric of a dynamical-sgd widths/periods sweep."
+        description="Build w vs T gridmaps for every metric of a dynamical-sgd wmaxs/periods sweep."
     )
     parser.add_argument(
         "--base-dir",
@@ -575,7 +575,7 @@ def main() -> None:
 
     print(f"Base dir:            {base_dir}")
     print(f"Config name:         {args.config_name}")
-    print(f"Widths:              {sorted(args.widths)}")
+    print(f"Widths:              {sorted(args.wmaxs)}")
     print(f"Periods:             {sorted(args.periods)}")
     print(f"Without-bumps dir:   {without_bumps_dir}")
     print(f"Output dir:          {output_dir}")
@@ -584,7 +584,7 @@ def main() -> None:
     result = build_grids(
         base_dir=base_dir,
         config_name=args.config_name,
-        widths=args.widths,
+        wmaxs=args.wmaxs,
         periods=args.periods,
         experiment_name=args.experiment_name,
         csv_name=args.csv_name,

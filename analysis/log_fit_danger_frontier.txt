@@ -1,0 +1,45 @@
+nohup: ignoring input
+Base dir:          /mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/gridsearch_wmaxs_periods
+Config name:       cifar10_resnet_narrow-always_bumps
+Widths swept:      [5, 10, 20, 50, 70, 100, 120, 150, 180, 250, 300, 350, 400, 450, 500]
+Periods swept:     [5, 10, 20, 50, 100, 200, 400, 800, 1000, 1200, 1500, 1800, 2000]
+Without-bumps dir: /mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/without_bumps/cifar10_resnet_narrow-no_bumps
+Output dir:        /mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/gridsearch_wmaxs_periods/grid_analysis
+------------------------------------------------------------------------------------------
+without_bumps -> /mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/without_bumps/cifar10_resnet_narrow-no_bumps/training_2026_07_16-16_20_15 (experiment='without_bumps', metrics_csv=metrics_for_multiple_classes.csv, accuracy_csv=training_metrics.csv)
+
+Configs found: 195/195
+
+Fitted parameters:
+  A0         = 0.8172
+  beta       = 0.0642
+  c          = 84.9631
+  delta0     = 0.9330
+  p          = 0.7621
+  T0base     = 0.5000
+  sigma      = 1.7855
+
+RMSE = 0.0690   R^2 = 0.9254   (accuracy units, 0-1 scale)
+
+==> Danger-frontier exponent p = 0.762  (T0(w_max) ~ w_max^p)
+    p=1 -> linear/diagonal,  p=0.5 -> sqrt,  p->0 -> log-like
+
+w_max -> fitted resonance period T0(w) [steps]  (predicted worst-T)
+  w_max=    5  ->  T0 =      1.7
+  w_max=   10  ->  T0 =      2.9
+  w_max=   20  ->  T0 =      4.9
+  w_max=   50  ->  T0 =      9.9
+  w_max=   70  ->  T0 =     12.7
+  w_max=  100  ->  T0 =     16.7
+  w_max=  120  ->  T0 =     19.2
+  w_max=  150  ->  T0 =     22.8
+  w_max=  180  ->  T0 =     26.2
+  w_max=  250  ->  T0 =     33.6
+  w_max=  300  ->  T0 =     38.6
+  w_max=  350  ->  T0 =     43.4
+  w_max=  400  ->  T0 =     48.1
+  w_max=  450  ->  T0 =     52.6
+  w_max=  500  ->  T0 =     57.0
+
+Fit report written to /mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/gridsearch_wmaxs_periods/grid_analysis/danger_frontier_fit.txt
+Gridmap with danger frontier written to /mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/gridsearch_wmaxs_periods/grid_analysis/test_accuracy_with_danger_frontier.png

@@ -131,30 +131,30 @@ def interp_extrap(x: np.ndarray, xp: np.ndarray, fp: np.ndarray) -> np.ndarray:
 def plot_frontier(
     grid: np.ndarray,
     periods: list[int],
-    widths_with_control: list[float],  # [1, w1, w2, ...] matching grid columns
+    wmaxs_with_control: list[float],  # [1, w1, w2, ...] matching grid columns
     x_labels: list[str],
     fit_params: np.ndarray,
     output_path: Path,
     n_sigma_band: float = 1.0,
 ) -> None:
     periods_arr = np.array(periods, dtype=float)
-    real_widths = np.array(widths_with_control[1:], dtype=float)  # drop the w=1 control
+    real_wmaxs = np.array(wmaxs_with_control[1:], dtype=float)  # drop the w=1 control
 
     # pixel-index lookup tables (grid_analysis.py convention: imshow origin
     # is "lower", row index i <-> periods[i] ascending, col index j <-> the
     # j-th entry of x_labels, where col 0 is the w=1 control column)
     row_ticks = np.arange(len(periods))
-    col_ticks = np.arange(1, len(widths_with_control))  # skip the w=1 control column
+    col_ticks = np.arange(1, len(wmaxs_with_control))  # skip the w=1 control column
 
     A0, beta, c, delta0, p, T0base, sigma = fit_params
 
-    # dense w range spanning (a bit beyond) the swept widths, in log-space
-    w_dense = np.geomspace(real_widths.min() * 0.8, real_widths.max() * 1.2, 200)
+    # dense w range spanning (a bit beyond) the swept wmaxs, in log-space
+    w_dense = np.geomspace(real_wmaxs.min() * 0.8, real_wmaxs.max() * 1.2, 200)
     T0_dense = T0base * np.power(w_dense, p)
     T_lo = T0_dense * np.exp(-n_sigma_band * sigma)
     T_hi = T0_dense * np.exp(n_sigma_band * sigma)
 
-    x_pix = interp_extrap(w_dense, real_widths, col_ticks)
+    x_pix = interp_extrap(w_dense, real_wmaxs, col_ticks)
     y_center = interp_extrap(T0_dense, periods_arr, row_ticks)
     y_lo = interp_extrap(T_lo, periods_arr, row_ticks)
     y_hi = interp_extrap(T_hi, periods_arr, row_ticks)
@@ -254,7 +254,7 @@ def main() -> None:
     result = ga.build_grids(
         base_dir=base_dir,
         config_name=args.config_name,
-        widths=args.wmaxs,
+        wmaxs=args.wmaxs,
         periods=args.periods,
         experiment_name=args.experiment_name,
         csv_name=args.csv_name,
@@ -270,9 +270,9 @@ def main() -> None:
         for line in result.missing:
             print(f"  - {line}")
 
-    grid = result.grids["test_accuracy"]  # shape (n_periods, n_widths + 1), col 0 = w=1 control
+    grid = result.grids["test_accuracy"]  # shape (n_periods, n_wmaxs + 1), col 0 = w=1 control
     T_list = result.periods               # ascending
-    w_list_full = [1] + result.widths     # ascending, includes the w=1 control at index 0
+    w_list_full = [1] + result.wmaxs     # ascending, includes the w=1 control at index 0
 
     if np.all(np.isnan(grid)):
         raise SystemExit("No test_accuracy values found anywhere in the sweep - check the paths/args above.")
@@ -309,7 +309,7 @@ def main() -> None:
 
     A0, beta, c, delta0, p, T0base, sigma = res.x
     print("\nw_max -> fitted resonance period T0(w) [steps]  (predicted worst-T)")
-    for w in result.widths:
+    for w in result.wmaxs:
         T0 = T0base * (w ** p)
         print(f"  w_max={w:5d}  ->  T0 = {T0:8.1f}")
 
@@ -326,7 +326,7 @@ def main() -> None:
     plot_frontier(
         grid=grid,
         periods=T_list,
-        widths_with_control=w_list_full,
+        wmaxs_with_control=w_list_full,
         x_labels=result.x_labels,
         fit_params=res.x,
         output_path=plot_path,
