@@ -288,6 +288,81 @@ def build_simple_cnn_model(
     return model, classifier, capture
 
 
+def load_pretrained_cnn(
+    checkpoint_path: str,
+    pretrained_num_classes: int,
+    new_num_classes: int,
+    input_ch: int,
+    device: torch.device,
+    backbone: str = "resnet18",
+    input_dim: int | None = None,
+    stem_spatial_size: int = 8,
+    blocks_per_stage: tuple[int, int, int, int] = (2, 2, 2, 2),
+    num_stages: int = 4,
+    width_mult: float = 1.0,
+    channels: list[int] | None = None,
+    kernel_size: int = 3,
+    use_batchnorm: bool = True,
+    pool_every_block: bool = True,
+    dropout: float = 0.0,
+    fc_hidden_dim: int | None = None,
+    freeze_backbone: bool = False,
+):
+    """Loads a checkpoint saved by run_training (model_weights.pt, i.e. a dict
+    with a 'torch_model' state_dict key) into a freshly-built backbone that
+    matches the ARCHITECTURE the checkpoint was trained with (same backbone
+    type / width / depth / stem, and — critically — the same
+    `pretrained_num_classes` the old classifier head had, e.g. 10 for
+    standard CIFAR-10). It then replaces the final classifier layer with a
+    brand-new `nn.Linear(in_features, new_num_classes)` (freshly initialized)
+    sized for the new label count (e.g. 3 CIFAR-10 metaclasses), and
+    re-registers the pre-classifier forward hook on that new layer so
+    TorchModelAdapter keeps working unchanged.
+
+    Only the classifier head is reinitialized; every backbone weight is
+    carried over from the checkpoint as-is. Set `freeze_backbone=True` to
+    keep those backbone weights fixed during the follow-up training run
+    (linear-probe style); leave it False to fine-tune the whole network.
+    """
+    if backbone == "resnet18":
+        model, classifier, capture = build_cnn_model(
+            num_classes=pretrained_num_classes, input_ch=input_ch, device=device,
+            input_dim=input_dim, stem_spatial_size=stem_spatial_size,
+            blocks_per_stage=blocks_per_stage, num_stages=num_stages, width_mult=width_mult,
+        )
+    elif backbone == "simple_cnn":
+        model, classifier, capture = build_simple_cnn_model(
+            num_classes=pretrained_num_classes, input_ch=input_ch, device=device,
+            channels=channels or [16, 32], kernel_size=kernel_size,
+            use_batchnorm=use_batchnorm, pool_every_block=pool_every_block,
+            dropout=dropout, fc_hidden_dim=fc_hidden_dim,
+            input_dim=input_dim, stem_spatial_size=stem_spatial_size,
+        )
+    else:
+        raise ValueError(f"Unknown backbone '{backbone}'. Expected 'resnet18' or 'simple_cnn'.")
+
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    state_dict = checkpoint["torch_model"] if "torch_model" in checkpoint else checkpoint
+    model.load_state_dict(state_dict)
+
+    in_features = classifier.in_features
+    new_classifier = nn.Linear(in_features, new_num_classes).to(device)
+
+    # model.fc is a property on _CNNWithStem (resnet18 path) or a plain
+    # attribute on SimpleCNN (simple_cnn path) -- in both cases the real
+    # owner is model.backbone, so assigning there is what actually takes
+    # effect; the `.fc` property just reads it back.
+    model.backbone.fc = new_classifier
+    new_classifier.register_forward_hook(_make_hook(capture))
+
+    if freeze_backbone:
+        for name, param in model.named_parameters():
+            if not name.startswith("backbone.fc."):
+                param.requires_grad_(False)
+
+    return model, new_classifier, capture
+
+
 def make_optimizer_and_scheduler(
     model: nn.Module, lr: float, momentum: float, weight_decay: float, epochs: int
 ):
@@ -296,8 +371,9 @@ def make_optimizer_and_scheduler(
         optimizer = optim.SGD(model.parameters(), lr=lr, momentum=momentum, weight_decay=weight_decay)
         lr_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[e//3, e*2//3], gamma=0.1)
     """
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.SGD(
-        model.parameters(), lr=lr, momentum=momentum, weight_decay=weight_decay
+        trainable_params, lr=lr, momentum=momentum, weight_decay=weight_decay
     )
     milestones = [epochs // 3, epochs * 2 // 3]
     scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=0.1)

@@ -1,0 +1,62 @@
+# Start from a CNN that ALREADY KNOWS CIFAR-10 (10 fine classes),
+# replace its classifier head with a fresh 3-way head, and retrain
+# (fine-tune) on the 3 metaclasses. 
+#
+# Prerequisite: run config/cifar10_baseline_cnn.yaml first (or point at any
+# existing 10-class CIFAR-10 run of yours) to get a model_weights.pt, then
+# fill in model.cnn.pretrained_checkpoint below with that path, e.g.:
+#   outputs/without_bumps/cifar10_baseline_cnn/training_2026_07_22-12_00_00/model_weights.pt
+#
+# Run:
+#   python launch.py --config config/cifar10_metaclasses_finetune.yaml --mode single
+
+use_gpu: true
+
+data:
+  dataset_name: cifar10
+  data_dir: ./data
+  num_classes: 3
+  metaclass_mapping:
+    - [0, 1, 8, 9]
+    - [3, 4, 5, 7]
+    - [2, 6]
+  metric_subset_size: 5000
+
+model:
+  architecture: cnn
+  init_type: pytorch_default
+  cnn:
+    backbone: resnet18
+    resnet:
+      blocks_per_stage: [2, 2, 2, 2]
+      num_stages: 4
+      width_mult: 1.0
+    # --- pretrained-model knobs (new) ---
+    pretrained_checkpoint: "FILL_IN_PATH_TO/model_weights.pt"
+    pretrained_num_classes: 10   # classes the checkpoint's head was trained with
+    freeze_backbone: false      # true = linear-probe the frozen backbone; false = fine-tune everything
+
+training:
+  training_steps: 6000            # fine-tuning: fewer steps than training from scratch
+  batch_size: 128
+  eval_batch_size: 256
+  save_metrics_every_n_steps: 100
+  loss: cross_entropy
+  random_seed: 42
+
+optimizer:
+  optimizer_type: sgd
+  learning_rate: 0.01             # smaller LR than the from-scratch run: we're fine-tuning
+  momentum: 0.9
+  weight_decay: 0.0005
+  nesterov: true
+
+dynamics:
+  bumps_before_tpt: false
+  bumps_at_tpt: false
+
+analysis:
+  compute_results: all
+
+output:
+  output_dir: ./outputs

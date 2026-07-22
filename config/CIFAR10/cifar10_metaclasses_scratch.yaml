@@ -1,0 +1,58 @@
+# Idea 1: train a CNN FROM SCRATCH on CIFAR-10 images, but relabeled into
+# 3 metaclasses. The network never sees the original 10 fine labels -- only
+# which of the 3 coarse groups each image belongs to. 
+#
+# Default grouping (edit data.metaclass_mapping to try a different one):
+#   metaclass 0 = vehicles          -> airplane(0), automobile(1), ship(8), truck(9)
+#   metaclass 1 = large mammals     -> cat(3), deer(4), dog(5), horse(7)
+#   metaclass 2 = bird + frog       -> bird(2), frog(6)
+#
+# Run:
+#   python launch.py --config config/cifar10_metaclasses_scratch.yaml --mode single
+
+use_gpu: true
+
+data:
+  dataset_name: cifar10
+  data_dir: ./data
+  num_classes: 3
+  metaclass_mapping:
+    - [0, 1, 8, 9]
+    - [3, 4, 5, 7]
+    - [2, 6]
+  metric_subset_size: 5000
+
+model:
+  architecture: cnn
+  init_type: pytorch_default
+  cnn:
+    backbone: resnet18
+    resnet:
+      blocks_per_stage: [2, 2, 2, 2]
+      num_stages: 4
+      width_mult: 1.0
+
+training:
+  training_steps: 15000
+  batch_size: 128
+  eval_batch_size: 256
+  save_metrics_every_n_steps: 100
+  loss: cross_entropy
+  random_seed: 42
+
+optimizer:
+  optimizer_type: sgd
+  learning_rate: 0.05
+  momentum: 0.9
+  weight_decay: 0.0005
+  nesterov: true
+
+dynamics:
+  bumps_before_tpt: false
+  bumps_at_tpt: false
+
+analysis:
+  compute_results: all
+
+output:
+  output_dir: ./outputs

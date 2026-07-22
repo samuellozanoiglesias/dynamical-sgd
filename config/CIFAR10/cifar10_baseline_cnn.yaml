@@ -1,0 +1,47 @@
+# Baseline: train a normal 10-class CIFAR-10 CNN from scratch.
+#
+# Run:
+#   python launch.py --config config/cifar10_baseline_cnn.yaml --mode single
+
+use_gpu: true
+
+data:
+  dataset_name: cifar10
+  data_dir: ./data
+  num_classes: 10
+  metric_subset_size: 5000
+
+model:
+  architecture: cnn
+  init_type: pytorch_default
+  cnn:
+    backbone: resnet18
+    resnet:
+      blocks_per_stage: [2, 2, 2, 2]
+      num_stages: 4
+      width_mult: 1.0
+
+training:
+  training_steps: 15000
+  batch_size: 128
+  eval_batch_size: 256
+  save_metrics_every_n_steps: 100
+  loss: cross_entropy
+  random_seed: 42
+
+optimizer:
+  optimizer_type: sgd
+  learning_rate: 0.05
+  momentum: 0.9
+  weight_decay: 0.0005
+  nesterov: true
+
+dynamics:
+  bumps_before_tpt: false
+  bumps_at_tpt: false
+
+analysis:
+  compute_results: all
+
+output:
+  output_dir: ./outputs

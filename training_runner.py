@@ -19,6 +19,7 @@ import torch
 from model_cnn import (
     build_cnn_model,
     build_simple_cnn_model,
+    load_pretrained_cnn,
     make_optimizer_and_scheduler,
     make_criterion,
     train_epoch_cnn,
@@ -959,6 +960,8 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
             input_ch = int(dataset_bundle.input_shape[0])
             input_dim = None
 
+        pretrained_checkpoint = cnn_cfg.get("pretrained_checkpoint")
+
         if backbone_name == "resnet18":
             resnet_cfg = cnn_cfg.get("resnet", {}) or {}
             blocks_per_stage = tuple(
@@ -966,28 +969,57 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
             )
             num_stages = int(resnet_cfg.get("num_stages", 4))
             width_mult = float(resnet_cfg.get("width_mult", 1.0))
-        
-            torch_model, classifier, feature_capture = build_cnn_model(
-                num_classes=num_classes, input_ch=input_ch, device=torch_device,
-                input_dim=input_dim,
-                stem_spatial_size=int(cnn_cfg.get("stem_spatial_size", 8)),
-                blocks_per_stage=blocks_per_stage,
-                num_stages=num_stages,
-                width_mult=width_mult,
-            )
+
+            if pretrained_checkpoint:
+                torch_model, classifier, feature_capture = load_pretrained_cnn(
+                    checkpoint_path=str(pretrained_checkpoint),
+                    pretrained_num_classes=int(cnn_cfg.get("pretrained_num_classes", 10)),
+                    new_num_classes=num_classes, input_ch=input_ch, device=torch_device,
+                    backbone="resnet18", input_dim=input_dim,
+                    stem_spatial_size=int(cnn_cfg.get("stem_spatial_size", 8)),
+                    blocks_per_stage=blocks_per_stage, num_stages=num_stages,
+                    width_mult=width_mult,
+                    freeze_backbone=_as_bool(cnn_cfg.get("freeze_backbone", False)),
+                )
+            else:
+                torch_model, classifier, feature_capture = build_cnn_model(
+                    num_classes=num_classes, input_ch=input_ch, device=torch_device,
+                    input_dim=input_dim,
+                    stem_spatial_size=int(cnn_cfg.get("stem_spatial_size", 8)),
+                    blocks_per_stage=blocks_per_stage,
+                    num_stages=num_stages,
+                    width_mult=width_mult,
+                )
         elif backbone_name == "simple_cnn":
             fc_hidden_dim_raw = cnn_cfg.get("fc_hidden_dim")
-            torch_model, classifier, feature_capture = build_simple_cnn_model(
-                num_classes=num_classes, input_ch=input_ch, device=torch_device,
-                channels=[int(c) for c in cnn_cfg.get("channels", [16, 32])],
-                kernel_size=int(cnn_cfg.get("kernel_size", 3)),
-                use_batchnorm=_as_bool(cnn_cfg.get("use_batchnorm", True)),
-                pool_every_block=_as_bool(cnn_cfg.get("pool_every_block", True)),
-                dropout=float(cnn_cfg.get("dropout", 0.0)),
-                fc_hidden_dim=(int(fc_hidden_dim_raw) if fc_hidden_dim_raw else None),
-                input_dim=input_dim,
-                stem_spatial_size=int(cnn_cfg.get("stem_spatial_size", 16)),
-            )
+            fc_hidden_dim = int(fc_hidden_dim_raw) if fc_hidden_dim_raw else None
+            channels = [int(c) for c in cnn_cfg.get("channels", [16, 32])]
+            kernel_size = int(cnn_cfg.get("kernel_size", 3))
+            use_batchnorm = _as_bool(cnn_cfg.get("use_batchnorm", True))
+            pool_every_block = _as_bool(cnn_cfg.get("pool_every_block", True))
+            dropout = float(cnn_cfg.get("dropout", 0.0))
+            stem_spatial_size = int(cnn_cfg.get("stem_spatial_size", 16))
+
+            if pretrained_checkpoint:
+                torch_model, classifier, feature_capture = load_pretrained_cnn(
+                    checkpoint_path=str(pretrained_checkpoint),
+                    pretrained_num_classes=int(cnn_cfg.get("pretrained_num_classes", 10)),
+                    new_num_classes=num_classes, input_ch=input_ch, device=torch_device,
+                    backbone="simple_cnn", input_dim=input_dim,
+                    stem_spatial_size=stem_spatial_size, channels=channels,
+                    kernel_size=kernel_size, use_batchnorm=use_batchnorm,
+                    pool_every_block=pool_every_block, dropout=dropout,
+                    fc_hidden_dim=fc_hidden_dim,
+                    freeze_backbone=_as_bool(cnn_cfg.get("freeze_backbone", False)),
+                )
+            else:
+                torch_model, classifier, feature_capture = build_simple_cnn_model(
+                    num_classes=num_classes, input_ch=input_ch, device=torch_device,
+                    channels=channels, kernel_size=kernel_size,
+                    use_batchnorm=use_batchnorm, pool_every_block=pool_every_block,
+                    dropout=dropout, fc_hidden_dim=fc_hidden_dim,
+                    input_dim=input_dim, stem_spatial_size=stem_spatial_size,
+                )
         else:
             raise ValueError(
                 f"Unknown model.cnn.backbone '{backbone_name}'. Expected 'resnet18' or 'simple_cnn'."

@@ -1404,17 +1404,154 @@ def _load_dartboard_bundle(data_cfg: dict, output_dir: Path) -> "DatasetBundle":
     )
 
 
+# ---------------------------------------------------------------------------
+# Metaclass / superclass relabeling.
+#
+# Groups an existing dataset's original labels into a smaller number of
+# "metaclasses" (e.g. CIFAR-10's 10 object classes -> 3 coarse groups), while
+# reusing every original image. This lets you ask: does a network trained (or
+# fine-tuned) on the *coarse* labels rediscover the finer original classes as
+# hidden geometric substructure (e.g. cylinders) inside each metaclass, even
+# though it never saw the fine labels?
+# ---------------------------------------------------------------------------
+
+# CIFAR-10 label order (fixed by the dataset): 0 airplane, 1 automobile,
+# 2 bird, 3 cat, 4 deer, 5 dog, 6 frog, 7 horse, 8 ship, 9 truck.
+# Default 3-way grouping used when data.metaclass_mapping is not given for
+# CIFAR-10: {vehicles} / {large mammals} / {bird, frog}. This is a reasonable
+# starting point, not a "correct" answer -- override via
+# data.metaclass_mapping in the config to try a different grouping.
+DEFAULT_CIFAR10_METACLASS_MAPPING = [
+    [0, 1, 8, 9],   # vehicles: airplane, automobile, ship, truck
+    [3, 4, 5, 7],   # mammals: cat, deer, dog, horse
+    [2, 6],         # bird, frog
+]
+
+
+def _resolve_metaclass_mapping(raw_mapping: object, num_original_classes: int) -> list[list[int]]:
+    """Parses data.metaclass_mapping into a validated list-of-lists of
+    original class indices, one sublist per metaclass. Every original class
+    index in [0, num_original_classes) must appear in exactly one sublist."""
+    if isinstance(raw_mapping, str):
+        import yaml as _yaml
+        raw_mapping = _yaml.safe_load(raw_mapping)
+    if not isinstance(raw_mapping, (list, tuple)) or len(raw_mapping) == 0:
+        raise ValueError(
+            "data.metaclass_mapping must be a non-empty list of lists of original "
+            "class indices, one list per metaclass."
+        )
+
+    mapping: list[list[int]] = [[int(c) for c in group] for group in raw_mapping]
+
+    seen: dict[int, int] = {}
+    for metaclass_id, group in enumerate(mapping):
+        if not group:
+            raise ValueError(f"data.metaclass_mapping group {metaclass_id} is empty.")
+        for original_class in group:
+            if original_class in seen:
+                raise ValueError(
+                    f"data.metaclass_mapping: original class {original_class} appears in "
+                    f"both metaclass {seen[original_class]} and metaclass {metaclass_id}."
+                )
+            seen[original_class] = metaclass_id
+
+    expected = set(range(num_original_classes))
+    if set(seen.keys()) != expected:
+        missing = sorted(expected - set(seen.keys()))
+        extra = sorted(set(seen.keys()) - expected)
+        raise ValueError(
+            "data.metaclass_mapping must cover every original class exactly once. "
+            f"Missing: {missing}. Unexpected: {extra}."
+        )
+
+    return mapping
+
+
+def _as_bool_local(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def remap_to_metaclasses(
+    bundle: "DatasetBundle",
+    mapping: list[list[int]],
+    output_dir: Path,
+    dataset_label: str,
+) -> "DatasetBundle":
+    """Relabels `bundle` (any DatasetBundle, image or tabular) by grouping its
+    original integer labels according to `mapping`. Original images/features,
+    ordering, and train/test split are all untouched -- only the label ints
+    are remapped from original-class-id -> metaclass-id."""
+    num_metaclasses = len(mapping)
+    lookup = np.full(bundle.num_classes, fill_value=-1, dtype=np.int64)
+    for metaclass_id, group in enumerate(mapping):
+        for original_class in group:
+            lookup[original_class] = metaclass_id
+
+    y_train_meta = lookup[bundle.train_targets]
+    y_test_meta = lookup[bundle.test_targets]
+
+    if len(bundle.input_shape) == 3:
+        meta_names = [f"meta_{i}_" + "+".join(str(c) for c in group) for i, group in enumerate(mapping)]
+        save_image_grid_visualizations(
+            bundle.train_inputs, y_train_meta, bundle.test_inputs, y_test_meta,
+            num_metaclasses, output_dir,
+            title_prefix=f"{dataset_label} (metaclasses)",
+            output_prefix=f"{dataset_label.lower()}_metaclasses",
+            class_names=meta_names,
+        )
+
+    return DatasetBundle(
+        train_inputs=bundle.train_inputs,
+        train_targets=y_train_meta,
+        test_inputs=bundle.test_inputs,
+        test_targets=y_test_meta,
+        class_to_indices=build_class_index_map(y_train_meta, num_metaclasses),
+        num_classes=num_metaclasses,
+        input_shape=bundle.input_shape,
+    )
+
+
+def _maybe_apply_metaclass_mapping(
+    bundle: "DatasetBundle", data_cfg: dict, output_dir: Path, dataset_label: str,
+) -> "DatasetBundle":
+    raw_mapping = data_cfg.get("metaclass_mapping")
+    use_default = _as_bool_local(data_cfg.get("use_default_metaclass_mapping", False))
+
+    if raw_mapping is None and not use_default:
+        return bundle
+
+    if raw_mapping is None:
+        if dataset_label.lower() != "cifar10":
+            raise ValueError(
+                "data.use_default_metaclass_mapping=true only has a built-in default for "
+                "cifar10. Provide data.metaclass_mapping explicitly for other datasets."
+            )
+        mapping = DEFAULT_CIFAR10_METACLASS_MAPPING
+    else:
+        mapping = _resolve_metaclass_mapping(raw_mapping, bundle.num_classes)
+
+    return remap_to_metaclasses(bundle, mapping, output_dir, dataset_label)
+
+
 def build_dataset_bundle(config: dict, output_dir: Path) -> DatasetBundle:
     data_cfg = config.get("data", {})
     dataset_name = str(data_cfg.get("dataset_name", "spiral")).strip().lower()
     if dataset_name == "mnist":
-        return _load_mnist_bundle(data_cfg, output_dir)
+        bundle = _load_mnist_bundle(data_cfg, output_dir)
+        return _maybe_apply_metaclass_mapping(bundle, data_cfg, output_dir, "mnist")
     if dataset_name == "cifar10":
-        return _load_cifar10_bundle(data_cfg, output_dir)
+        bundle = _load_cifar10_bundle(data_cfg, output_dir)
+        return _maybe_apply_metaclass_mapping(bundle, data_cfg, output_dir, "cifar10")
     if dataset_name == "cifar100":
-        return _load_cifar100_bundle(data_cfg, output_dir)
+        bundle = _load_cifar100_bundle(data_cfg, output_dir)
+        return _maybe_apply_metaclass_mapping(bundle, data_cfg, output_dir, "cifar100")
     if dataset_name == "tiny_imagenet":
-        return _load_tiny_imagenet_bundle(data_cfg, output_dir)
+        bundle = _load_tiny_imagenet_bundle(data_cfg, output_dir)
+        return _maybe_apply_metaclass_mapping(bundle, data_cfg, output_dir, "tiny_imagenet")
     if dataset_name == "spiral":
         return _load_spiral_bundle(data_cfg, output_dir)
     if dataset_name == "gaussian_blobs":
