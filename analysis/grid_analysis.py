@@ -511,7 +511,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--periods", type=int, nargs="+",
-        default=[5, 10, 20, 50, 100, 200, 400, 800, 1000, 1200, 1500, 1800, 2000],
+        default=[1, 2, 3, 4, 5, 10, 20, 50, 100, 200, 400, 800, 1000, 1200, 1500, 1800, 2000],
         help="PERIODS array from the sbatch script (dynamics.period_length values).",
     )
     parser.add_argument(

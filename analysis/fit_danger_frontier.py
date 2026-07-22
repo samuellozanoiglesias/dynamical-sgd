@@ -7,10 +7,26 @@ test_accuracy gridmap of a w_max x period_length sweep, and draws the
 predicted danger frontier T0(w_max) (plus a +/-1 sigma risk band) on top of
 the test_accuracy heatmap.
 
-Unlike a hand-copied grid of numbers, T_list / w_list / grid are obtained
-straight from the experiment directories via grid_analysis.build_grids(),
-so this script is meant to be run with (a subset of) the exact same CLI
-arguments you already pass to grid_analysis.py for the same sweep.
+Two data sources are supported, and the script picks the right one
+automatically from --config_name:
+
+1. "experiment_tree" (original behaviour) - T_list / w_list / grid are
+   pulled straight from a sweep's experiment directories via
+   grid_analysis.build_grids(), driven by --base_dir/--wmaxs/--periods/etc.
+   This is used for any --config_name NOT in SPIRAL_GRID_CONFIGS below.
+
+2. "csv" (new) - for the four pre-aggregated spiral_grid_results sweeps:
+       results_large_nn_new
+       results_large_bs_new
+       results_large_bs_large_nn_new
+       results_new
+   these live as flat CSVs (columns T, w_max, train_accuracy,
+   test_accuracy - one row per (T, w_max) cell) under
+       /mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/spiral_grid_results/
+   When --config_name is one of the four names above, the script switches
+   to this mode automatically: it locates the matching CSV under that
+   directory, and auto-detects the swept T (period) and w_max values
+   directly from the data instead of requiring --wmaxs/--periods.
 
 The model
 ---------
@@ -30,7 +46,11 @@ fit the same way the original hand-written script excluded it).
 
 Usage
 -----
-nohup python fit_danger_frontier.py > log_fit_danger_frontier.out 2>&1 &
+# original experiment-tree mode (unchanged)
+nohup python fit_danger_frontier.py --config_name cifar10_resnet_narrow-always_bumps > log.out 2>&1 &
+
+# new CSV mode - just point --config_name at one of the 4 dataset names
+nohup python fit_danger_frontier.py --config_name results_large_bs_new > log.out 2>&1 &
 """
 
 from __future__ import annotations
@@ -41,18 +61,141 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+import pandas as pd
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from scipy.optimize import least_squares
 
-# Reuse grid_analysis.py's directory-discovery / grid-building code instead
-# of re-implementing (and risking drifting out of sync with) it. Assumes
-# grid_analysis.py lives next to this file; use --grid-analysis-path to
-# point elsewhere.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import grid_analysis as ga
+
+# ---------------------------------------------------------------------------
+# 0. CSV-mode configuration
+# ---------------------------------------------------------------------------
+
+# config_name values that mean "read one of the pre-aggregated spiral grid
+# search CSVs" instead of walking an experiment directory tree.
+SPIRAL_GRID_CONFIGS = {
+    "results_large_nn_new",
+    "results_large_bs_new",
+    "results_large_bs_large_nn_new",
+    "results_new",
+}
+
+DEFAULT_SPIRAL_GRID_DIR = Path(
+    "/mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/spiral_grid_results/"
+)
+
+# Accepted column-name variants in the spiral_grid_results CSVs (matched
+# case-insensitively), so the loader is robust to minor naming differences
+# between the four files.
+_T_COL_CANDIDATES = ["t", "period", "period_length", "periods"]
+_W_COL_CANDIDATES = ["w_max", "wmax", "w"]
+_TEST_ACC_COL_CANDIDATES = ["test_accuracy", "test_acc", "accuracy", "acc"]
+_TRAIN_ACC_COL_CANDIDATES = ["train_accuracy", "train_acc"]
+
+
+def find_csv_for_config(spiral_dir: Path, config_name: str) -> Path:
+    """Locate the CSV file for `config_name` under `spiral_dir`.
+
+    Tries, in order: an exact stem match (e.g. results_new.csv), then any
+    CSV whose stem contains config_name as a substring (in case the real
+    files are named/nested slightly differently, e.g. inside a
+    per-config subfolder). Raises FileNotFoundError if nothing matches.
+    """
+    if not spiral_dir.is_dir():
+        raise FileNotFoundError(
+            f"spiral_grid_results directory not found: {spiral_dir}\n"
+            "Pass --spiral_grid_dir to point at the right location."
+        )
+
+    candidates = sorted(spiral_dir.rglob("*.csv"))
+    if not candidates:
+        raise FileNotFoundError(f"No CSV files found anywhere under {spiral_dir}")
+
+    exact = [p for p in candidates if p.stem == config_name]
+    if exact:
+        return exact[0]
+
+    contains = [p for p in candidates if config_name in p.stem]
+    if contains:
+        if len(contains) > 1:
+            print(
+                f"[warn] multiple CSVs matched config_name={config_name!r} under "
+                f"{spiral_dir}: {[str(p) for p in contains]}. Using {contains[0]}."
+            )
+        return contains[0]
+
+    raise FileNotFoundError(
+        f"No CSV matching config_name={config_name!r} found under {spiral_dir}. "
+        f"Available files: {[p.name for p in candidates]}"
+    )
+
+
+def _pick_column(df: pd.DataFrame, candidates: list[str]) -> Optional[str]:
+    lower_map = {c.lower(): c for c in df.columns}
+    for name in candidates:
+        if name in lower_map:
+            return lower_map[name]
+    return None
+
+
+def load_grid_from_csv(csv_path: Path):
+    """Read a spiral_grid_results CSV and build (periods, wmaxs, grid, x_labels).
+
+    The CSV is expected to have one row per (T, w_max) cell (columns
+    T/period, w_max, and test_accuracy - train_accuracy is read too if
+    present but isn't needed for the fit). Periods and w_max values are
+    auto-detected as the sorted unique values found in the file - nothing
+    needs to be hardcoded on the CLI for this mode.
+    """
+    df = pd.read_csv(csv_path)
+
+    T_col = _pick_column(df, _T_COL_CANDIDATES)
+    w_col = _pick_column(df, _W_COL_CANDIDATES)
+    acc_col = _pick_column(df, _TEST_ACC_COL_CANDIDATES)
+
+    missing = [
+        label
+        for label, col in (("T/period", T_col), ("w_max", w_col), ("test_accuracy", acc_col))
+        if col is None
+    ]
+    if missing:
+        raise ValueError(
+            f"CSV {csv_path} is missing expected column(s): {missing}. "
+            f"Columns found: {list(df.columns)}"
+        )
+
+    # Collapse duplicate (T, w_max) rows (e.g. multiple seeds) by averaging.
+    n_before = len(df)
+    pivot = df.pivot_table(index=T_col, columns=w_col, values=acc_col, aggfunc="mean")
+    n_cells = pivot.shape[0] * pivot.shape[1]
+    if n_before > n_cells:
+        print(
+            f"[note] {csv_path.name}: {n_before} rows collapsed into {n_cells} "
+            f"(T, w_max) cells by averaging duplicates."
+        )
+
+    periods_raw = sorted(pivot.index.tolist())
+    wmaxs_raw = sorted(pivot.columns.tolist())
+    pivot = pivot.reindex(index=periods_raw, columns=wmaxs_raw)
+    grid = pivot.to_numpy(dtype=float)
+
+    # Prefer clean integer display for periods/wmaxs when the values are
+    # integral floats (e.g. 100.0 -> 100), purely cosmetic for labels/prints.
+    def _clean(values):
+        out = []
+        for v in values:
+            fv = float(v)
+            out.append(int(fv) if fv.is_integer() else fv)
+        return out
+
+    periods = _clean(periods_raw)
+    wmaxs_full = _clean(wmaxs_raw)  # includes the w_max=1 control if present
+
+    x_labels = [("1 (no bumps)" if w == 1 else f"{w:g}") for w in wmaxs_full]
+
+    return periods, wmaxs_full, grid, x_labels
 
 
 # ---------------------------------------------------------------------------
@@ -98,11 +241,11 @@ def fit_model(T_flat: np.ndarray, w_flat: np.ndarray, acc_flat: np.ndarray):
 # ---------------------------------------------------------------------------
 # 2. Data <-> pixel mapping for the categorical imshow axes
 #
-# grid_analysis.py's heatmaps use imshow on a purely categorical grid (each
-# tick is one index, regardless of how far apart the real T / w_max values
-# are). To draw a *continuous* curve like T0(w_max) on top of that grid we
-# have to run it through the same index mapping, interpolating between
-# known ticks and linearly extrapolating beyond the swept range.
+# The heatmaps use imshow on a purely categorical grid (each tick is one
+# index, regardless of how far apart the real T / w_max values are). To
+# draw a *continuous* curve like T0(w_max) on top of that grid we have to
+# run it through the same index mapping, interpolating between known ticks
+# and linearly extrapolating beyond the swept range.
 # ---------------------------------------------------------------------------
 
 def interp_extrap(x: np.ndarray, xp: np.ndarray, fp: np.ndarray) -> np.ndarray:
@@ -130,8 +273,8 @@ def interp_extrap(x: np.ndarray, xp: np.ndarray, fp: np.ndarray) -> np.ndarray:
 
 def plot_frontier(
     grid: np.ndarray,
-    periods: list[int],
-    wmaxs_with_control: list[float],  # [1, w1, w2, ...] matching grid columns
+    periods: list,
+    wmaxs_with_control: list,  # [1, w1, w2, ...] matching grid columns
     x_labels: list[str],
     fit_params: np.ndarray,
     output_path: Path,
@@ -140,9 +283,9 @@ def plot_frontier(
     periods_arr = np.array(periods, dtype=float)
     real_wmaxs = np.array(wmaxs_with_control[1:], dtype=float)  # drop the w=1 control
 
-    # pixel-index lookup tables (grid_analysis.py convention: imshow origin
-    # is "lower", row index i <-> periods[i] ascending, col index j <-> the
-    # j-th entry of x_labels, where col 0 is the w=1 control column)
+    # pixel-index lookup tables (imshow origin is "lower", row index i <->
+    # periods[i] ascending, col index j <-> the j-th entry of x_labels,
+    # where col 0 is the w=1 control column)
     row_ticks = np.arange(len(periods))
     col_ticks = np.arange(1, len(wmaxs_with_control))  # skip the w=1 control column
 
@@ -196,61 +339,28 @@ def plot_frontier(
 
 
 # ---------------------------------------------------------------------------
-# 4. CLI
+# 4. Experiment-tree loader (original behaviour, imported lazily so that
+#    CSV-mode runs don't need grid_analysis.py to be present at all)
 # ---------------------------------------------------------------------------
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Fit the resonance/adiabatic model to a test_accuracy sweep "
-                     "and plot the predicted danger frontier on the gridmap."
-    )
-    parser.add_argument("--base_dir", type=str, default="/mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/gridsearch_wmaxs_periods/",
-                         help="BASE_OUTPUT_DIR used by the sbatch script (contains w{W}_p{P} subfolders).")
-    parser.add_argument("--config_name", type=str, default="cifar10_resnet_narrow-always_bumps",
-                         help="Stem of the config file used for the sweep (output.config_name).")
-    parser.add_argument("--wmaxs", type=int, nargs="+", default=[5, 10, 20, 50, 70, 100, 120, 150, 180, 250, 300, 350, 400, 450, 500],
-                         help="dynamics.w_max values that were swept (excluding the without_bumps control).")
-    parser.add_argument("--periods", type=int, nargs="+", default=[5, 10, 20, 50, 100, 200, 400, 800, 1000, 1200, 1500, 1800, 2000],
-                         help="dynamics.period_length values that were swept.")
-    parser.add_argument("--experiment_name", type=str, default=None)
-    parser.add_argument("--without_bumps_dir", type=str, default="/mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/without_bumps/cifar10_resnet_narrow-no_bumps",
-                         help="output.output_dir of the separate without_bumps run "
-                              "(used only as a reference column, excluded from the fit).")
-    parser.add_argument("--without_bumps_experiment_name", type=str, default=None)
-    parser.add_argument("--without_bumps_config_name", type=str, default=None)
-    parser.add_argument("--csv_name", type=str, default=None)
-    parser.add_argument("--accuracy_csv_name", type=str, default=None)
-    parser.add_argument("--output_dir", type=str, default=None,
-                         help="Where to write danger_frontier.png and fitted_params.txt. "
-                              "Defaults to <base-dir>/grid_analysis.")
-    parser.add_argument("--n_sigma_band", type=float, default=1.0,
-                         help="Width (in ln-T sigmas) of the shaded risk band around T0(w). Default 1.0.")
-    parser.add_argument("--grid-analysis-path", type=str, default=None,
-                         help="Directory containing grid_analysis.py, if not alongside this script.")
-    args = parser.parse_args()
-
+def load_from_experiment_tree(args):
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
     if args.grid_analysis_path:
         sys.path.insert(0, str(Path(args.grid_analysis_path).expanduser().resolve()))
-        global ga
-        import grid_analysis as ga  # noqa: F811  (re-import from the requested path)
+    import grid_analysis as ga  # local import: only required for this mode
 
     base_dir = Path(args.base_dir).expanduser().resolve()
-    output_dir = (
-        Path(args.output_dir).expanduser().resolve() if args.output_dir else base_dir / "grid_analysis"
-    )
     without_bumps_dir = (
         Path(args.without_bumps_dir).expanduser().resolve() if args.without_bumps_dir else None
     )
 
+    print(f"Data source:       experiment_tree")
     print(f"Base dir:          {base_dir}")
     print(f"Config name:       {args.config_name}")
     print(f"Widths swept:      {sorted(args.wmaxs)}")
     print(f"Periods swept:     {sorted(args.periods)}")
     print(f"Without-bumps dir: {without_bumps_dir}")
-    print(f"Output dir:        {output_dir}")
-    print("-" * 90)
 
-    # ---- pull T_list, w_list, grid straight from the experiment tree ----
     result = ga.build_grids(
         base_dir=base_dir,
         config_name=args.config_name,
@@ -271,15 +381,100 @@ def main() -> None:
             print(f"  - {line}")
 
     grid = result.grids["test_accuracy"]  # shape (n_periods, n_wmaxs + 1), col 0 = w=1 control
-    T_list = result.periods               # ascending
-    w_list_full = [1] + result.wmaxs     # ascending, includes the w=1 control at index 0
+    periods = result.periods              # ascending
+    wmaxs_full = [1] + result.wmaxs       # ascending, includes the w=1 control at index 0
+    x_labels = result.x_labels
+
+    return periods, wmaxs_full, grid, x_labels
+
+
+def load_from_spiral_csv(args):
+    spiral_dir = Path(args.spiral_grid_dir).expanduser().resolve()
+    csv_path = find_csv_for_config(spiral_dir, args.config_name)
+
+    print(f"Data source:       csv (spiral_grid_results)")
+    print(f"Spiral grid dir:   {spiral_dir}")
+    print(f"Config name:       {args.config_name}")
+    print(f"CSV file:          {csv_path}")
+
+    periods, wmaxs_full, grid, x_labels = load_grid_from_csv(csv_path)
+
+    print(f"Periods detected:  {periods}")
+    print(f"w_max detected:    {wmaxs_full}")
+
+    return periods, wmaxs_full, grid, x_labels
+
+
+# ---------------------------------------------------------------------------
+# 5. CLI
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Fit the resonance/adiabatic model to a test_accuracy sweep "
+                     "and plot the predicted danger frontier on the gridmap."
+    )
+    parser.add_argument("--base_dir", type=str, default="/mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/gridsearch_wmaxs_periods/",
+                         help="[experiment_tree mode] BASE_OUTPUT_DIR used by the sbatch script "
+                              "(contains w{W}_p{P} subfolders). Ignored in csv mode.")
+    parser.add_argument("--config_name", type=str, default="cifar10_resnet_narrow-always_bumps",
+                         help="Stem of the config file used for the sweep (output.config_name). "
+                              "If this is one of results_large_nn_new / results_large_bs_new / "
+                              "results_large_bs_large_nn_new / results_new, the script "
+                              "automatically switches to csv mode and reads the matching file "
+                              "from --spiral_grid_dir instead of --base_dir.")
+    parser.add_argument("--spiral_grid_dir", type=str, default=str(DEFAULT_SPIRAL_GRID_DIR),
+                         help="[csv mode] Directory containing the four spiral grid search CSVs.")
+    parser.add_argument("--wmaxs", type=int, nargs="+", default=[5, 10, 20, 50, 70, 100, 120, 150, 180, 200, 250, 300, 350, 400, 450, 500],
+                         help="[experiment_tree mode] dynamics.w_max values swept (excl. control). "
+                              "Ignored in csv mode - w_max values are auto-detected from the CSV.")
+    parser.add_argument("--periods", type=int, nargs="+", default=[1, 2, 3, 4, 5, 10, 20, 50, 100, 200, 400, 800, 1000, 1200, 1500, 1800, 2000],
+                         help="[experiment_tree mode] dynamics.period_length values swept. "
+                              "Ignored in csv mode - periods are auto-detected from the CSV.")
+    parser.add_argument("--experiment_name", type=str, default=None)
+    parser.add_argument("--without_bumps_dir", type=str, default="/mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/without_bumps/cifar10_resnet_narrow-no_bumps",
+                         help="[experiment_tree mode] output.output_dir of the separate without_bumps "
+                              "run (used only as a reference column, excluded from the fit).")
+    parser.add_argument("--without_bumps_experiment_name", type=str, default=None)
+    parser.add_argument("--without_bumps_config_name", type=str, default=None)
+    parser.add_argument("--csv_name", type=str, default=None)
+    parser.add_argument("--accuracy_csv_name", type=str, default=None)
+    parser.add_argument("--output_root", type=str, default=".",
+                         help="Root directory under which fit_danger_frontier/gridsearch_wmaxs_periods/"
+                              "<config_name>/ is created. Defaults to the current directory.")
+    parser.add_argument("--output_dir", type=str, default=None,
+                         help="Explicit output directory, overriding the "
+                              "<output_root>/fit_danger_frontier/gridsearch_wmaxs_periods/<config_name> default.")
+    parser.add_argument("--n_sigma_band", type=float, default=1.0,
+                         help="Width (in ln-T sigmas) of the shaded risk band around T0(w). Default 1.0.")
+    parser.add_argument("--grid-analysis-path", dest="grid_analysis_path", type=str, default=None,
+                         help="[experiment_tree mode] Directory containing grid_analysis.py, "
+                              "if not alongside this script.")
+    args = parser.parse_args()
+
+    output_dir = (
+        Path(args.output_dir).expanduser().resolve()
+        if args.output_dir
+        else Path("/mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd").expanduser().resolve()
+        / "fit_danger_frontier" / args.config_name
+    )
+    print(f"Output dir:        {output_dir}")
+    print("-" * 90)
+
+    # ---- pick the data source automatically from config_name ----
+    if args.config_name in SPIRAL_GRID_CONFIGS:
+        periods, wmaxs_full, grid, x_labels = load_from_spiral_csv(args)
+    else:
+        periods, wmaxs_full, grid, x_labels = load_from_experiment_tree(args)
 
     if np.all(np.isnan(grid)):
         raise SystemExit("No test_accuracy values found anywhere in the sweep - check the paths/args above.")
 
+    real_wmaxs = [w for w in wmaxs_full if w > 1]
+
     # ---- flatten for fitting, dropping the w=1 control column and NaNs ----
-    Ts = np.array(T_list, dtype=float)
-    Ws = np.array(w_list_full, dtype=float)
+    Ts = np.array(periods, dtype=float)
+    Ws = np.array(wmaxs_full, dtype=float)
     TT, WW = np.meshgrid(Ts, Ws, indexing="ij")
     TT = TT.ravel()
     WW = WW.ravel()
@@ -294,7 +489,7 @@ def main() -> None:
     if mask.sum() < len(PARAM_NAMES):
         raise SystemExit(
             f"Only {mask.sum()} usable (T, w_max) points found - not enough to fit "
-            f"a {len(PARAM_NAMES)}-parameter model. Check --wmaxs / --periods / paths."
+            f"a {len(PARAM_NAMES)}-parameter model. Check the data source/paths above."
         )
 
     res, rmse, r2 = fit_model(TT[mask], WW[mask], ACC[mask])
@@ -309,25 +504,25 @@ def main() -> None:
 
     A0, beta, c, delta0, p, T0base, sigma = res.x
     print("\nw_max -> fitted resonance period T0(w) [steps]  (predicted worst-T)")
-    for w in result.wmaxs:
+    for w in real_wmaxs:
         T0 = T0base * (w ** p)
-        print(f"  w_max={w:5d}  ->  T0 = {T0:8.1f}")
+        print(f"  w_max={w:>7}  ->  T0 = {T0:8.1f}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    params_path = output_dir / "danger_frontier_fit.txt"
+    params_path = output_dir / f"danger_frontier_fit_{args.config_name}.txt"
     with open(params_path, "w", encoding="utf-8") as f:
         f.write(f"RMSE={rmse:.6f}  R2={r2:.6f}\n")
         for name, value in zip(PARAM_NAMES, res.x):
             f.write(f"{name}={value:.6f}\n")
     print(f"\nFit report written to {params_path}")
 
-    plot_path = output_dir / "test_accuracy_with_danger_frontier.png"
+    plot_path = output_dir / f"test_accuracy_with_danger_frontier_{args.config_name}.png"
     plot_frontier(
         grid=grid,
-        periods=T_list,
-        wmaxs_with_control=w_list_full,
-        x_labels=result.x_labels,
+        periods=periods,
+        wmaxs_with_control=wmaxs_full,
+        x_labels=x_labels,
         fit_params=res.x,
         output_path=plot_path,
         n_sigma_band=args.n_sigma_band,
