@@ -20,43 +20,58 @@ data:
     - [0, 1, 8, 9]
     - [3, 4, 5, 7]
     - [2, 6]
-  metric_subset_size: 5000
 
 model:
-  architecture: cnn
-  init_type: pytorch_default
+  architecture: resnet18_cnn
   cnn:
     backbone: resnet18
     resnet:
-      blocks_per_stage: [2, 2, 2, 2]
       num_stages: 4
-      width_mult: 1.0
+      blocks_per_stage: [1, 1, 1, 1]   # "resnet10"
+      width_mult: 0.5
     # --- pretrained-model knobs (new) ---
     pretrained_checkpoint: "FILL_IN_PATH_TO/model_weights.pt"
     pretrained_num_classes: 10   # classes the checkpoint's head was trained with
     freeze_backbone: false      # true = linear-probe the frozen backbone; false = fine-tune everything
 
 training:
-  training_steps: 6000            # fine-tuning: fewer steps than training from scratch
+  training_steps: 5000
+  save_metrics_every_n_steps: 1
   batch_size: 128
-  eval_batch_size: 256
-  save_metrics_every_n_steps: 100
-  loss: cross_entropy
   random_seed: 42
+  loss: cross_entropy
 
 optimizer:
   optimizer_type: sgd
-  learning_rate: 0.01             # smaller LR than the from-scratch run: we're fine-tuning
+  learning_rate: 0.0679
   momentum: 0.9
   weight_decay: 0.0005
-  nesterov: true
+  gradient_clipping: null
+  nesterov: false
 
 dynamics:
   bumps_before_tpt: false
   bumps_at_tpt: false
 
 analysis:
-  compute_results: all
+  metric_subset_size: 5000
+  plot_version: simplified
+  compute_results: average
+  outputs:
+    classifier_metrics: false
+    nc_metrics: false
+    separability_metrics: false
+    pca_analysis: false
+    pca_geometric: false
+    hyperplane_metrics: false
+    proj_nc_analysis: false
+    multiclass_metrics: true
+  pca:
+    projected_dims:
+    - 1
+    - 2
+    - 3
+    - 5
 
 output:
-  output_dir: ./outputs
+  output_dir: /data/samuel_lozano/dynamical-sgd

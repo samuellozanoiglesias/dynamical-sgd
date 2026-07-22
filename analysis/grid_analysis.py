@@ -55,10 +55,7 @@ Usage
         --output-dir /path/to/gridsearch_wmaxs_periods/grid_analysis
 
 Example:
-nohup python grid_analysis.py \
-    --base-dir /mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/gridsearch_wmaxs_periods \
-    --config-name cifar10_resnet10-always_bumps \
-    > log_grid_analysis.out 2>&1 &
+nohup python grid_analysis.py --config-name cifar10_resnet_narrow-always_bumps > log_grid_analysis.out 2>&1 &
 """
 
 from __future__ import annotations

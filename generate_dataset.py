@@ -53,6 +53,35 @@ class DatasetBundle:
     input_shape: tuple[int, ...]
 
 
+def _wants_metaclass_remap(data_cfg: dict) -> bool:
+    """True if this data_cfg will remap labels to metaclasses after loading
+    (via _maybe_apply_metaclass_mapping) -- in which case data.num_classes
+    refers to the FINAL metaclass count, not the dataset's native label
+    count, so loaders must not validate it against their native count."""
+    return data_cfg.get("metaclass_mapping") is not None or bool(
+        data_cfg.get("use_default_metaclass_mapping", False)
+    )
+
+
+def _resolve_native_num_classes(data_cfg: dict, native_count: int, dataset_label: str) -> int:
+    """Returns the native (pre-metaclass) class count a loader should use,
+    validating data.num_classes against it -- unless a metaclass mapping is
+    configured, in which case data.num_classes is the post-remap count and
+    this check is skipped (build_dataset_bundle validates the post-remap
+    count separately once the mapping has been applied)."""
+    if _wants_metaclass_remap(data_cfg):
+        return native_count
+    num_classes = int(data_cfg.get("num_classes", native_count))
+    if num_classes != native_count:
+        raise ValueError(
+            f"{dataset_label} loader expects data.num_classes={native_count} "
+            "(its native label count). To train on fewer coarse labels, use "
+            "data.metaclass_mapping (or data.use_default_metaclass_mapping) "
+            "instead of setting data.num_classes directly."
+        )
+    return num_classes
+
+
 def _parse_angular_offsets(raw_offsets: object) -> Optional[list[float]]:
     if raw_offsets is None:
         return None
@@ -717,9 +746,7 @@ def _load_mnist_bundle(data_cfg: dict, output_dir: Path) -> DatasetBundle:
     y_train = train_labels.astype(np.int64)
     y_test = test_labels.astype(np.int64)
 
-    num_classes = int(data_cfg.get("num_classes", 10))
-    if num_classes != 10:
-        raise ValueError("MNIST loader expects data.num_classes=10.")
+    num_classes = _resolve_native_num_classes(data_cfg, 10, "MNIST")
 
     save_mnist_visualizations(x_train, y_train, x_test, y_test, output_dir)
 
@@ -911,9 +938,7 @@ def _load_cifar10_bundle(data_cfg: dict, output_dir: Path) -> DatasetBundle:
     y_train = train_labels.astype(np.int64)
     y_test = test_labels.astype(np.int64)
 
-    num_classes = int(data_cfg.get("num_classes", 10))
-    if num_classes != 10:
-        raise ValueError("CIFAR-10 loader expects data.num_classes=10.")
+    num_classes = _resolve_native_num_classes(data_cfg, 10, "CIFAR-10")
 
     meta = _unpickle(extracted_dir / "batches.meta")
     class_names = [name.decode("utf-8") for name in meta[b"label_names"]]
@@ -955,11 +980,9 @@ def _load_cifar100_bundle(data_cfg: dict, output_dir: Path) -> DatasetBundle:
     y_test = np.asarray(test_batch[label_key], dtype=np.int64)
 
     default_num_classes = 100 if label_mode == "fine" else 20
-    num_classes = int(data_cfg.get("num_classes", default_num_classes))
-    if num_classes != default_num_classes:
-        raise ValueError(
-            f"CIFAR-100 loader with label_mode='{label_mode}' expects data.num_classes={default_num_classes}."
-        )
+    num_classes = _resolve_native_num_classes(
+        data_cfg, default_num_classes, f"CIFAR-100 (label_mode='{label_mode}')"
+    )
 
     meta = _unpickle(extracted_dir / "meta")
     meta_key = b"fine_label_names" if label_mode == "fine" else b"coarse_label_names"
@@ -993,9 +1016,10 @@ def _load_tiny_imagenet_bundle(data_cfg: dict, output_dir: Path) -> DatasetBundl
     wnid_to_class = {wnid: idx for idx, wnid in enumerate(wnids)}
     num_classes = len(wnids)
 
-    configured_num_classes = int(data_cfg.get("num_classes", num_classes))
-    if configured_num_classes != num_classes:
-        raise ValueError(f"Tiny-ImageNet loader found {num_classes} classes on disk; data.num_classes must match.")
+    if not _wants_metaclass_remap(data_cfg):
+        configured_num_classes = int(data_cfg.get("num_classes", num_classes))
+        if configured_num_classes != num_classes:
+            raise ValueError(f"Tiny-ImageNet loader found {num_classes} classes on disk; data.num_classes must match.")
 
     def _load_image(path: Path) -> np.ndarray:
         with Image.open(path) as img:
