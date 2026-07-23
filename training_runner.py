@@ -87,8 +87,9 @@ from metrics_for_multiple_classes import (
     append_multiclass_csv_row,
     collect_multiclass_epoch,
     finalize_multiclass_plots,
+    finalize_shape_metrics_plots,
     initialize_multiclass_csv,
-    compute_batched_logits,
+    #compute_batched_logits,
 )
 
 from model import JAXModel, ParamTree, build_model
@@ -1171,9 +1172,11 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
     
     multiclass_csv_path: Path | None = None
     multiclass_figure_path: Path | None = None
+    multiclass_shape_path: Path | None = None
     if enable_multiclass_metrics:
         multiclass_csv_path = run_dir / "metrics_for_multiple_classes.csv"
         multiclass_figure_path = run_dir / "metrics_for_multiple_classes.png"
+        multiclass_shape_path = run_dir / "collapse_shapes.png"
         initialize_multiclass_csv(multiclass_csv_path)
 
     if use_pytorch_cnn:
@@ -1488,13 +1491,13 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
                     raise RuntimeError(
                         "multiclass_metrics enabled but pre-classifier/logits were not collected."
                     )
-                test_logits, test_labels = compute_batched_logits(
-                    model=model,
-                    params=params,
-                    inputs=test_metric_inputs,
-                    targets=test_metric_targets,
-                    eval_batch_size=eval_batch_size,
-                )
+                #test_logits, test_labels = compute_batched_logits(
+                #    model=model,
+                #    params=params,
+                #    inputs=test_metric_inputs,
+                #    targets=test_metric_targets,
+                #    eval_batch_size=eval_batch_size,
+                #)
                 initial_weight_matrix = initial_classifier_weight
 
                 if use_pytorch_cnn:
@@ -1505,12 +1508,12 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
                 mc_raw = collect_multiclass_epoch(
                     pre_classifier=pre_classifier,
                     targets=labels,
-                    train_logits=logits,
-                    test_logits=test_logits,
-                    test_targets=test_labels,
+                    #train_logits=logits,
+                    #test_logits=test_logits,
+                    #test_targets=test_labels,
                     weight_matrix=weight_matrix,
-                    initial_weight_matrix=initial_weight_matrix,
-                    cumulative_weight_distance=cumulative_weight_distance,
+                    #initial_weight_matrix=initial_weight_matrix,
+                    #cumulative_weight_distance=cumulative_weight_distance,
                     num_classes=num_classes,
                     previous_weight_matrix=last_classifier_weight,
                 )
@@ -1649,6 +1652,11 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
         finalize_multiclass_plots(
             csv_path=multiclass_csv_path,
             output_path=multiclass_figure_path,
+            tpt_step=tpt_step if tpt_reached else -1,
+        )
+        finalize_shape_metrics_plots(
+            csv_path=multiclass_csv_path,
+            output_path=multiclass_shape_path,
             tpt_step=tpt_step if tpt_reached else -1,
         )
 

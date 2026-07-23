@@ -5,42 +5,60 @@ Fully-vectorized, GPU-friendly metrics for multi-class NC / geometry runs.
 This module computes, in a single jitted JAX program per epoch (no Python
 loop over classes or class pairs):
 
-  * train_accuracy, test_accuracy               (global, not per-class)
-  * classifier condition_number, path_curvature_ratio, weight_path_distance
-    (the cumulative distance the weights have traveled — the numerator of
-    path_curvature_ratio)
-  * NC1, NC2 (mean |cos - ETF target| deviation)
+  * NC1, NC2 (mean |cos - ETF target| deviation)                    [k=0]
   * avg_separation_margin                        (mean over all class pairs)
   * cyl_half_length_mean, cyl_radius_mean         (mean over all classes)
   * bhattacharyya_distance_mean                   (mean over all class pairs)
   * pca_alignment_mean                            (mean |cos| between each
     class's first-PC "cylinder axis" and every other class's, over all
     class pairs)
-  * nc1_deflated, nc2_deflated_deviation          (after removing each
-    class's own first-PC "cylinder axis" — see projection_PCA_analysis.py
-    for the un-vectorized reference implementation this mirrors)
-  * nc1_ratio_deflated, nc2_ratio_deflated        (deflated / original)
+  * participation_ratio_mean                      (effective dimensionality
+    of within-class scatter: PR_c = (sum lambda)^2 / sum(lambda^2). PR_c ~ d
+    for an isotropic "ball", PR_c ~ 1 for a pure "cylinder".)
+  * elongation_mean                                (lambda1 / trace(Sigma_c),
+    i.e. fraction of within-class variance carried by the single dominant
+    eigenvector. Cheap complement to participation ratio.)
+  * axis_between_class_alignment_mean              (mean |cos| between each
+    class's dominant elongation axis and its own between-class separation
+    direction mu_c - global_mean. Near 0 => elongation is a harmless shared
+    nuisance direction; near 1 => the elongation axis actually carries
+    discriminative signal, i.e. deflating it could *hurt* separability.)
+  * nc1_k{1,2,3}, nc2_k{1,2,3}                     (full deflation curve:
+    NC1/NC2 recomputed after removing each class's own top-k within-class
+    eigenvectors, for k = 1, 2, 3. k=0 is just the original nc1/nc2.)
+  * nc1_ratio_k{1,2,3}, nc2_ratio_k{1,2,3}          (deflated / original,
+    i.e. NC(k) / NC(0). Ratio << 1 for any k is evidence of cylinder-like
+    rather than ball-like within-class geometry.)
 
 Vectorization notes
 --------------------
-- Per-class sums/means: one-hot matmul (`onehot.T @ x`), a GEMM — fast on GPU.
+- Per-class sums/means: one-hot matmul (`onehot.T @ x`), a GEMM -- fast on GPU.
 - Per-class covariance (C, D, D): built with a single scatter-add
   (`jnp.zeros(...).at[targets].add(outer)`) instead of a Python loop over
-  classes, then a single *batched* `jnp.linalg.eigh` call extracts every
-  class's first principal component (cylinder axis) at once.
+  classes, then a single *batched* `jnp.linalg.eigh` call extracts the full
+  eigenvalue spectrum and eigenbasis for every class at once. This single
+  eigh call is reused for the cylinder radius/half-length, the participation
+  ratio, the elongation coefficient, and the top-K axes used for the
+  deflation curve -- no extra eigendecompositions anywhere in this module.
 - All-pairs quantities (NC2 cosine deviation, separation margin,
   Bhattacharyya distance, PCA axis alignment) are computed as full (C, C)
   matrices and reduced with an upper-triangular mask, instead of iterating
   over `class_pairs`. This means this module does NOT need a `class_pairs`
-  list at all — every unique pair is covered automatically and exactly once.
+  list at all -- every unique pair is covered automatically and exactly once.
+- The deflation curve (k=1,2,3) is computed with a single cumulative-sum
+  trick: project each sample onto its class's top-K eigenvectors once,
+  then `jnp.cumsum` along the K axis gives the reconstruction to subtract
+  for every k in one shot, instead of K separate projection passes.
 - The whole pipeline is wrapped in a single `jax.jit` (static on
   `num_classes`), so one call = one compiled program on the device.
 
 Caveat: the pairwise Bhattacharyya step builds a (C, C, D, D) tensor and
 solves C*C batched DxD linear systems. This is very fast for typical
 pre-classifier widths (D up to a few hundred) and moderate C (a few dozen to
-~100 classes). For very large C * D, consider chunking the class-pair axis;
-not needed for the dataset configs in this repo.
+~100 classes); it remains the dominant cost in this module, well above the
+cost of the new PR/elongation/deflation-curve metrics. For very large C * D,
+consider chunking the class-pair axis; not needed for the dataset configs
+in this repo.
 """
 
 from __future__ import annotations
@@ -58,6 +76,9 @@ import numpy as np
 EPS = 1e-12
 REG_EPS = 1e-6
 
+# Max k for the NC(k) deflation curve (k = 1, 2, 3; k = 0 is the original NC).
+DEFLATION_MAX_K = 3
+
 
 # ---------------------------------------------------------------------------
 # Data container
@@ -65,9 +86,6 @@ REG_EPS = 1e-6
 
 @dataclass
 class MultiClassEpochRaw:
-    condition_number: float
-    path_curvature_ratio: float
-    weight_path_distance: float
     nc1: float
     nc2_deviation: float
     avg_separation_margin: float
@@ -75,10 +93,21 @@ class MultiClassEpochRaw:
     cyl_radius_mean: float
     bhattacharyya_distance_mean: float
     pca_alignment_mean: float
-    nc1_deflated: float
-    nc2_deflated_deviation: float
-    nc1_ratio_deflated: float
-    nc2_ratio_deflated: float
+    participation_ratio_mean: float
+    elongation_mean: float
+    axis_between_class_alignment_mean: float
+    nc1_k1: float
+    nc1_k2: float
+    nc1_k3: float
+    nc2_k1: float
+    nc2_k2: float
+    nc2_k3: float
+    nc1_ratio_k1: float
+    nc1_ratio_k2: float
+    nc1_ratio_k3: float
+    nc2_ratio_k1: float
+    nc2_ratio_k2: float
+    nc2_ratio_k3: float
     sensitive_param_fraction: float
     mean_weight_step_distance: float
 
@@ -91,69 +120,18 @@ def _flatten_features(x: jnp.ndarray) -> jnp.ndarray:
     return jnp.reshape(x, (x.shape[0], -1))
 
 
-def _extract_classifier_weight_matrix(params: dict) -> jnp.ndarray:
-    """Same convention as classifier_metrics.py: params['classifier']['kernel'],
-    transposed to (num_classes, feature_dim)."""
-    try:
-        kernel = params["classifier"]["kernel"]
-    except Exception as exc:  # pragma: no cover - guards mismatched params.
-        raise ValueError("params must include params['classifier']['kernel']") from exc
-    return jnp.transpose(jnp.asarray(kernel), (1, 0))
-
-
-def compute_batched_logits(
-    model,
-    params,
-    inputs: np.ndarray,
-    targets: np.ndarray,
-    eval_batch_size: int,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Run a batched forward pass to get logits for a (typically held-out)
-    dataset, without materializing per-class activations. Returns
-    (logits, targets) as numpy arrays, concatenated across batches."""
-    if eval_batch_size <= 0:
-        raise ValueError("eval_batch_size must be > 0")
-    num_samples = int(inputs.shape[0])
-    if num_samples == 0:
-        raise ValueError("No samples provided to compute_batched_logits.")
-
-    logits_chunks: list[np.ndarray] = []
-    for start in range(0, num_samples, eval_batch_size):
-        end = min(num_samples, start + eval_batch_size)
-        batch_x = np.asarray(inputs[start:end], dtype=np.float32)
-        batch_logits = model.apply(params, batch_x, return_intermediates=False)
-        logits_chunks.append(np.asarray(batch_logits, dtype=np.float32))
-
-    logits = np.concatenate(logits_chunks, axis=0)
-    return logits, np.asarray(targets, dtype=np.int64)
-
-
 # ---------------------------------------------------------------------------
 # Core vectorized computation (single jitted program, no per-class loop)
 # ---------------------------------------------------------------------------
 
 @partial(jax.jit, static_argnames=("num_classes",))
 def _compute_multiclass_core(
-    features: jnp.ndarray,               # (N_train, D)
-    targets: jnp.ndarray,                # (N_train,)
-    train_logits: jnp.ndarray,           # (N_train, C)
-    test_logits: jnp.ndarray,            # (N_test, C)
-    test_targets: jnp.ndarray,           # (N_test,)
-    weight_matrix: jnp.ndarray,          # (C, D)
-    initial_weight_matrix: jnp.ndarray,  # (C, D)
-    cumulative_weight_distance: jnp.ndarray,  # scalar
+    features: jnp.ndarray,               # (N, D)
+    targets: jnp.ndarray,                # (N,)
     num_classes: int,
 ) -> dict[str, jnp.ndarray]:
     C = num_classes
     N, D = features.shape
-
-    # ---- classifier weight geometry ----
-    singular_vals = jnp.linalg.svd(weight_matrix, compute_uv=False)
-    condition_number = singular_vals[0] / jnp.maximum(singular_vals[-1], EPS)
-
-    weight_delta = weight_matrix - initial_weight_matrix
-    weight_delta_norm = jnp.linalg.norm(weight_delta)
-    path_curvature_ratio = cumulative_weight_distance / (weight_delta_norm + EPS)
 
     # ---- per-class sums / means, fully vectorized via one-hot matmul ----
     onehot = jax.nn.one_hot(targets, C, dtype=features.dtype)          # (N, C)
@@ -193,7 +171,11 @@ def _compute_multiclass_core(
 
     nc1, nc2, avg_margin = _nc1_nc2_margin(centered_means, sq_dev, onehot, counts)
 
-    # ---- per-class cylinder axis (first PC), batched covariance + eigh ----
+    # ---- per-class within-class covariance + full batched eigendecomposition ----
+    # This single eigh call is reused below for: cylinder radius/half-length,
+    # participation ratio, elongation coefficient, cross-class PCA axis
+    # alignment, the between-class alignment check, and the top-K axes used
+    # for the deflation curve. No further eigendecompositions are needed.
     outer = deltas[:, :, None] * deltas[:, None, :]                   # (N, D, D)
     cov_sum = jnp.zeros((C, D, D), dtype=features.dtype).at[targets].add(outer)
     cov = cov_sum / jnp.maximum(counts - 1.0, 1.0)[:, None, None]
@@ -201,10 +183,25 @@ def _compute_multiclass_core(
 
     eigvals, eigvecs = jnp.linalg.eigh(cov)                            # ascending, batched
     lambda1 = eigvals[:, -1]
-    axis = eigvecs[:, :, -1]                                           # (C, D) unit vectors
+    axis = eigvecs[:, :, -1]                                           # (C, D) unit vectors, top PC
     half_length = jnp.sqrt(jnp.clip(lambda1, 0.0, None))
     rest_mean = jnp.mean(eigvals[:, :-1], axis=-1)
     radius = jnp.sqrt(jnp.clip(rest_mean, 0.0, None))
+
+    # ---- participation ratio (effective dimensionality) & elongation ----
+    # PR_c = (sum_i lambda_i)^2 / sum_i lambda_i^2. Ball (isotropic, dim d)
+    # -> PR_c ~= d; pure cylinder (one dominant direction) -> PR_c ~= 1.
+    sum_eigvals = jnp.sum(eigvals, axis=-1)                            # (C,) = trace(Sigma_c)
+    sum_eigvals_sq = jnp.sum(eigvals * eigvals, axis=-1)               # (C,)
+    participation_ratio = (sum_eigvals * sum_eigvals) / (sum_eigvals_sq + EPS)
+    participation_ratio_mean = jnp.mean(participation_ratio)
+
+    # e_c = lambda1 / trace(Sigma_c): fraction of within-class variance
+    # carried by the single dominant direction. e_c ~= 1/D for a ball,
+    # e_c -> 1 for a pure cylinder. Cheaper, more directly interpretable
+    # complement to the participation ratio above.
+    elongation = lambda1 / (sum_eigvals + EPS)
+    elongation_mean = jnp.mean(elongation)
 
     # ---- pairwise quantities over all (C, C) pairs at once ----
     pair_mask = jnp.triu(jnp.ones((C, C), dtype=features.dtype), k=1)
@@ -212,12 +209,20 @@ def _compute_multiclass_core(
 
     # Mean PCA axis alignment: |cos| between each pair of classes' first
     # principal component ("cylinder axis"), averaged over all class pairs.
-    # `axis` rows are already unit-norm (eigenvectors from jnp.linalg.eigh),
-    # so the Gram matrix is directly the cosine matrix; clip defensively for
-    # floating-point drift before taking the absolute value.
     axis_gram = axis @ axis.T                                         # (C, C)
     axis_cos_mat = jnp.clip(axis_gram, -1.0, 1.0)
     pca_alignment_mean = jnp.sum(pair_mask * jnp.abs(axis_cos_mat)) / (num_pairs + EPS)
+
+    # Between-class alignment: |cos| between each class's own dominant
+    # elongation axis and its own between-class direction (mu_c - global
+    # mean). ~0 => elongation is a harmless shared nuisance direction that
+    # rides along independently of class separation (expected for the
+    # "cylinder" story); ~1 => the elongation axis itself carries
+    # discriminative signal, so deflating it would remove real separation,
+    # not just nuisance variance.
+    between_norms = jnp.linalg.norm(centered_means, axis=-1)
+    axis_between_cos = jnp.sum(axis * centered_means, axis=-1) / (between_norms + EPS)
+    axis_between_class_alignment_mean = jnp.mean(jnp.abs(axis_between_cos))
 
     cov_avg = 0.5 * (cov[:, None] + cov[None, :])                      # (C, C, D, D)
     delta_mu = class_means[None, :, :] - class_means[:, None, :]       # (C, C, D)
@@ -235,27 +240,41 @@ def _compute_multiclass_core(
     db_mat = term1 + term2
     bhattacharyya_mean = jnp.sum(pair_mask * db_mat) / (num_pairs + EPS)
 
-    # ---- cylinder-deflated NC1 / NC2 (remove each sample's own-class axis) ----
-    u_per_sample = axis[targets]                                       # (N, D)
-    proj_coeff = jnp.sum(features * u_per_sample, axis=-1, keepdims=True)
-    deflated = features - proj_coeff * u_per_sample
+    # ---- full deflation curve: NC1(k) / NC2(k) for k = 1, 2, ..., DEFLATION_MAX_K ----
+    # Remove each sample's own class's top-k within-class eigenvectors
+    # (ranked by eigenvalue, largest first) and recompute NC1/NC2. This
+    # generalizes the old single-step (k=1) deflation to a full curve: a
+    # true "cylinder" shows a sharp NC1 drop at k=1 then a plateau; a more
+    # complex or genuinely ball-like geometry will not show that elbow.
+    #
+    # `eigvecs` is ascending by eigenvalue, so reversing the last axis and
+    # taking the first K columns gives the top-K eigenvectors in descending
+    # order in a single slice (no extra eigh, no per-k gather).
+    top_axes = eigvecs[:, :, ::-1][:, :, :DEFLATION_MAX_K]             # (C, D, K)
+    axes_per_sample = top_axes[targets]                                 # (N, D, K)
 
-    class_sums_d = onehot.T @ deflated
-    class_means_d = class_sums_d / counts[:, None]
-    global_mean_d = jnp.mean(class_means_d, axis=0)
-    centered_means_d = class_means_d - global_mean_d
-    deltas_d = deflated - class_means_d[targets]
-    sq_dev_d = jnp.sum(deltas_d * deltas_d, axis=-1)
+    # Project once onto all K axes, then a single cumsum gives the
+    # cumulative reconstruction to subtract for every k in one shot.
+    coeffs = jnp.einsum("nd,ndk->nk", features, axes_per_sample)       # (N, K)
+    contrib = coeffs[:, None, :] * axes_per_sample                     # (N, D, K)
+    cum_contrib = jnp.cumsum(contrib, axis=-1)                         # (N, D, K)
 
-    nc1_defl, nc2_defl, _ = _nc1_nc2_margin(centered_means_d, sq_dev_d, onehot, counts)
+    nc1_curve = [nc1]
+    nc2_curve = [nc2]
+    for k in range(1, DEFLATION_MAX_K + 1):
+        deflated_k = features - cum_contrib[:, :, k - 1]               # (N, D)
+        class_sums_k = onehot.T @ deflated_k
+        class_means_k = class_sums_k / counts[:, None]
+        global_mean_k = jnp.mean(class_means_k, axis=0)
+        centered_means_k = class_means_k - global_mean_k
+        deltas_k = deflated_k - class_means_k[targets]
+        sq_dev_k = jnp.sum(deltas_k * deltas_k, axis=-1)
 
-    nc1_ratio = nc1_defl / (nc1 + EPS)
-    nc2_ratio = nc2_defl / (nc2 + EPS)
+        nc1_k, nc2_k, _ = _nc1_nc2_margin(centered_means_k, sq_dev_k, onehot, counts)
+        nc1_curve.append(nc1_k)
+        nc2_curve.append(nc2_k)
 
-    return {
-        "condition_number": condition_number,
-        "path_curvature_ratio": path_curvature_ratio,
-        "weight_path_distance": cumulative_weight_distance,
+    out = {
         "nc1": nc1,
         "nc2": nc2,
         "avg_margin": avg_margin,
@@ -263,11 +282,17 @@ def _compute_multiclass_core(
         "radius_mean": jnp.mean(radius),
         "bhattacharyya_mean": bhattacharyya_mean,
         "pca_alignment_mean": pca_alignment_mean,
-        "nc1_deflated": nc1_defl,
-        "nc2_deflated": nc2_defl,
-        "nc1_ratio_deflated": nc1_ratio,
-        "nc2_ratio_deflated": nc2_ratio,
+        "participation_ratio_mean": participation_ratio_mean,
+        "elongation_mean": elongation_mean,
+        "axis_between_class_alignment_mean": axis_between_class_alignment_mean,
     }
+    for k in range(1, DEFLATION_MAX_K + 1):
+        out[f"nc1_k{k}"] = nc1_curve[k]
+        out[f"nc2_k{k}"] = nc2_curve[k]
+        out[f"nc1_ratio_k{k}"] = nc1_curve[k] / (nc1_curve[0] + EPS)
+        out[f"nc2_ratio_k{k}"] = nc2_curve[k] / (nc2_curve[0] + EPS)
+
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -277,42 +302,32 @@ def _compute_multiclass_core(
 def collect_multiclass_epoch(
     pre_classifier: np.ndarray,
     targets: np.ndarray,
-    train_logits: np.ndarray,
-    test_logits: np.ndarray,
-    test_targets: np.ndarray,
     weight_matrix: np.ndarray,
-    initial_weight_matrix: np.ndarray,
-    cumulative_weight_distance: float,
     num_classes: int,
     previous_weight_matrix: np.ndarray | None = None,
     sensitivity_threshold: float = 1e-3,
 ) -> MultiClassEpochRaw:
-    """Compute all multi-class metrics for one epoch in a single jitted call."""
+    """Compute all multi-class metrics for one epoch in a single jitted call.
+
+    Note: `weight_matrix` / `previous_weight_matrix` are only used for the
+    step-wise weight-movement tracking (`sensitive_param_fraction`,
+    `mean_weight_step_distance`), computed outside the jitted core. The
+    classifier condition-number / path-curvature metrics that used to also
+    consume the weight matrix here have been removed; if your training_runner
+    was passing `initial_weight_matrix` / `cumulative_weight_distance` only
+    for those, those call-site arguments can be dropped too -- happy to
+    patch training_runner if you share it.
+    """
     targets_np = np.asarray(targets, dtype=np.int64)
     class_counts = np.bincount(targets_np, minlength=num_classes)
     missing = np.where(class_counts <= 0)[0].tolist()
     if missing:
         raise ValueError(f"Cannot compute multi-class metrics for classes with no samples: {missing}")
 
-    test_targets_np = np.asarray(test_targets, dtype=np.int64)
-    test_missing = np.where(np.bincount(test_targets_np, minlength=num_classes) <= 0)[0].tolist()
-    # Test-set class coverage is not required (test accuracy is global), so
-    # we don't raise here — just proceed.
-
     features = _flatten_features(jnp.asarray(pre_classifier, dtype=jnp.float32))
     targets_arr = jnp.asarray(targets_np, dtype=jnp.int32)
-    train_logits_arr = jnp.asarray(train_logits, dtype=jnp.float32)
-    test_logits_arr = jnp.asarray(test_logits, dtype=jnp.float32)
-    test_targets_arr = jnp.asarray(test_targets_np, dtype=jnp.int32)
-    weight_matrix_arr = jnp.asarray(weight_matrix, dtype=jnp.float32)
-    initial_weight_matrix_arr = jnp.asarray(initial_weight_matrix, dtype=jnp.float32)
-    cumulative_weight_distance_arr = jnp.asarray(cumulative_weight_distance, dtype=jnp.float32)
 
     # --- Step-wise weight movement (this step vs. the previous recorded step) ---
-    # "Sensitive" parameters are ones whose weight moved by more than
-    # `sensitivity_threshold` since the last measurement; mean_weight_step_distance
-    # is the average |delta| across ALL parameters, which is expected to shrink
-    # as training converges (large early steps, near-zero later steps).
     if previous_weight_matrix is None:
         sensitive_param_fraction = float("nan")
         mean_weight_step_distance = float("nan")
@@ -326,23 +341,10 @@ def collect_multiclass_epoch(
             sensitive_param_fraction = float(np.mean(step_abs_delta > sensitivity_threshold))
             mean_weight_step_distance = float(np.mean(step_abs_delta))
 
-    result = _compute_multiclass_core(
-        features,
-        targets_arr,
-        train_logits_arr,
-        test_logits_arr,
-        test_targets_arr,
-        weight_matrix_arr,
-        initial_weight_matrix_arr,
-        cumulative_weight_distance_arr,
-        num_classes,
-    )
+    result = _compute_multiclass_core(features, targets_arr, num_classes)
     result = {k: float(np.asarray(v)) for k, v in result.items()}
 
     return MultiClassEpochRaw(
-        condition_number=result["condition_number"],
-        path_curvature_ratio=result["path_curvature_ratio"],
-        weight_path_distance=result["weight_path_distance"],
         nc1=result["nc1"],
         nc2_deviation=result["nc2"],
         avg_separation_margin=result["avg_margin"],
@@ -350,10 +352,21 @@ def collect_multiclass_epoch(
         cyl_radius_mean=result["radius_mean"],
         bhattacharyya_distance_mean=result["bhattacharyya_mean"],
         pca_alignment_mean=result["pca_alignment_mean"],
-        nc1_deflated=result["nc1_deflated"],
-        nc2_deflated_deviation=result["nc2_deflated"],
-        nc1_ratio_deflated=result["nc1_ratio_deflated"],
-        nc2_ratio_deflated=result["nc2_ratio_deflated"],
+        participation_ratio_mean=result["participation_ratio_mean"],
+        elongation_mean=result["elongation_mean"],
+        axis_between_class_alignment_mean=result["axis_between_class_alignment_mean"],
+        nc1_k1=result["nc1_k1"],
+        nc1_k2=result["nc1_k2"],
+        nc1_k3=result["nc1_k3"],
+        nc2_k1=result["nc2_k1"],
+        nc2_k2=result["nc2_k2"],
+        nc2_k3=result["nc2_k3"],
+        nc1_ratio_k1=result["nc1_ratio_k1"],
+        nc1_ratio_k2=result["nc1_ratio_k2"],
+        nc1_ratio_k3=result["nc1_ratio_k3"],
+        nc2_ratio_k1=result["nc2_ratio_k1"],
+        nc2_ratio_k2=result["nc2_ratio_k2"],
+        nc2_ratio_k3=result["nc2_ratio_k3"],
         sensitive_param_fraction=sensitive_param_fraction,
         mean_weight_step_distance=mean_weight_step_distance,
     )
@@ -364,9 +377,6 @@ def collect_multiclass_epoch(
 # ---------------------------------------------------------------------------
 
 _CSV_FIELDS: list[str] = [
-    "condition_number",
-    "path_curvature_ratio",
-    "weight_path_distance",
     "nc1",
     "nc2_deviation",
     "avg_separation_margin",
@@ -374,10 +384,21 @@ _CSV_FIELDS: list[str] = [
     "cyl_radius_mean",
     "bhattacharyya_distance_mean",
     "pca_alignment_mean",
-    "nc1_deflated",
-    "nc2_deflated_deviation",
-    "nc1_ratio_deflated",
-    "nc2_ratio_deflated",
+    "participation_ratio_mean",
+    "elongation_mean",
+    "axis_between_class_alignment_mean",
+    "nc1_k1",
+    "nc1_k2",
+    "nc1_k3",
+    "nc2_k1",
+    "nc2_k2",
+    "nc2_k3",
+    "nc1_ratio_k1",
+    "nc1_ratio_k2",
+    "nc1_ratio_k3",
+    "nc2_ratio_k1",
+    "nc2_ratio_k2",
+    "nc2_ratio_k3",
     "sensitive_param_fraction",
     "mean_weight_step_distance",
 ]
@@ -420,7 +441,8 @@ def _load_multiclass_columns(csv_path: Path) -> list[dict[str, float]]:
 
 
 # ---------------------------------------------------------------------------
-# Plotting / finalization
+# Plotting / finalization -- general geometry metrics (no NC1/NC2, those
+# moved to finalize_shape_metrics_plots below)
 # ---------------------------------------------------------------------------
 
 def finalize_multiclass_plots(
@@ -435,44 +457,9 @@ def finalize_multiclass_plots(
     steps = np.asarray([int(row["global_step"]) for row in rows], dtype=np.int64)
     cols = {name: np.asarray([row[name] for row in rows], dtype=np.float64) for name in _CSV_FIELDS}
 
-    fig, axes = plt.subplots(5, 2, figsize=(16, 25), sharex=True)
+    fig, axes = plt.subplots(3, 2, figsize=(16, 15), sharex=True)
 
     ax = axes[0, 0]
-    ax.plot(steps, cols["condition_number"], linewidth=1.8, label="condition number", color="steelblue")
-    ax.set_ylabel("kappa(W) (log)")
-    ax.set_yscale("log")
-    ax.grid(True, alpha=0.3)
-    ax2 = ax.twinx()
-    ax2.plot(steps, cols["path_curvature_ratio"], linewidth=1.4, color="darkorange", label="path curvature ratio")
-    ax2.set_ylabel("Path curvature ratio")
-    ax3 = ax.twinx()
-    ax3.spines["right"].set_position(("outward", 60))
-    ax3.plot(steps, cols["weight_path_distance"], linewidth=1.4, color="mediumseagreen", label="weight path distance")
-    ax3.set_ylabel("Cumulative weight path distance")
-    ax.set_title("Classifier Condition Number, Path Curvature & Weight Path Distance")
-    lines1, labels1 = ax.get_legend_handles_labels()
-    lines2, labels2 = ax2.get_legend_handles_labels()
-    lines3, labels3 = ax3.get_legend_handles_labels()
-    ax.legend(lines1 + lines2 + lines3, labels1 + labels2 + labels3, fontsize=8)
-
-    ax = axes[0, 1]
-    ax.plot(steps, cols["nc1"], linewidth=1.8, label="NC1 original", color="steelblue")
-    ax.plot(steps, cols["nc1_deflated"], linewidth=1.8, label="NC1 deflated", color="tomato", linestyle="--")
-    ax.set_title("NC1: Original vs Cylinder-Deflated")
-    ax.set_ylabel("NC1 (log)")
-    ax.set_yscale("log")
-    ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=8)
-
-    ax = axes[1, 0]
-    ax.plot(steps, cols["nc2_deviation"], linewidth=1.8, label="NC2 original", color="steelblue")
-    ax.plot(steps, cols["nc2_deflated_deviation"], linewidth=1.8, label="NC2 deflated", color="tomato", linestyle="--")
-    ax.set_title("NC2 Deviation: Original vs Cylinder-Deflated")
-    ax.set_ylabel("Mean |cos - ETF target|")
-    ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=8)
-
-    ax = axes[1, 1]
     ax.plot(steps, cols["avg_separation_margin"], linewidth=1.8, color="seagreen")
     ax.axhline(0.0, color="red", linestyle="--", linewidth=1.4, label="touching (margin=0)")
     ax.set_title("Average Separation Margin (mean over all class pairs)")
@@ -480,7 +467,7 @@ def finalize_multiclass_plots(
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8)
 
-    ax = axes[2, 0]
+    ax = axes[0, 1]
     ax.plot(steps, cols["cyl_half_length_mean"], linewidth=1.8, label="mean half-length L")
     ax.plot(steps, cols["cyl_radius_mean"], linewidth=1.8, label="mean radius r", linestyle="--")
     ax.set_title("Cylinder Half-Length & Radius (mean over classes)")
@@ -488,51 +475,138 @@ def finalize_multiclass_plots(
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8)
 
-    ax = axes[2, 1]
+    ax = axes[1, 0]
     ax.plot(steps, cols["bhattacharyya_distance_mean"], linewidth=1.8, color="purple")
     ax.set_title("Bhattacharyya Distance (mean over all class pairs)")
-    ax.set_xlabel("Global Step")
     ax.set_ylabel("Distance")
     ax.grid(True, alpha=0.3)
 
-    ax = axes[3, 0]
-    ax.plot(steps, cols["nc1_ratio_deflated"], linewidth=1.8, label="NC1 ratio (deflated/original)")
-    ax.plot(steps, cols["nc2_ratio_deflated"], linewidth=1.8, label="NC2 ratio (deflated/original)", linestyle="--")
-    ax.axhline(1.0, color="black", linestyle=":", linewidth=1.2, label="no change")
-    ax.set_title("Deflation Ratios (< 1 confirms cylinder hypothesis)")
-    ax.set_xlabel("Global Step")
-    ax.set_ylabel("Ratio")
-    ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=8)
-
-    ax = axes[3, 1]
+    ax = axes[1, 1]
     ax.plot(steps, cols["pca_alignment_mean"], linewidth=1.8, color="darkred")
     ax.set_title("Mean PCA Axis Alignment (mean |cos| over all class pairs)")
-    ax.set_xlabel("Global Step")
     ax.set_ylabel("Mean |cos(axis_i, axis_j)|")
     ax.set_ylim(0.0, 1.02)
     ax.grid(True, alpha=0.3)
 
-    ax = axes[4, 0]
+    ax = axes[2, 0]
     ax.plot(steps, cols["sensitive_param_fraction"], linewidth=1.8, color="darkorange")
     ax.set_title("Sensitive Parameter Fraction (|delta| > threshold)")
     ax.set_xlabel("Global Step")
     ax.set_ylabel("Fraction of parameters")
     ax.grid(True, alpha=0.3)
 
-    ax = axes[4, 1]
+    ax = axes[2, 1]
     ax.plot(steps, cols["mean_weight_step_distance"], linewidth=1.8, color="steelblue")
-    ax.set_title("Mean Weight Step Distance (mean over all class pairs)")
+    ax.set_title("Mean Weight Step Distance")
     ax.set_xlabel("Global Step")
     ax.set_ylabel("Distance")
     ax.grid(True, alpha=0.3)
 
     if tpt_step >= 0:
-        for r in range(5):
+        for r in range(3):
             for c in range(2):
                 axes[r, c].axvline(tpt_step, color="black", linestyle="-", linewidth=2.0)
 
-    fig.suptitle("Multi-Class Metrics (global accuracy, NC, geometry)", fontsize=16)
+    fig.suptitle("Multi-Class Metrics (separation geometry & weight dynamics)", fontsize=16)
+    plt.tight_layout(rect=[0.0, 0.0, 1.0, 0.96])
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Plotting / finalization -- NC1/NC2 + cylinder-shape metrics (PR,
+# elongation, full deflation curve)
+# ---------------------------------------------------------------------------
+
+def finalize_shape_metrics_plots(
+    csv_path: Path,
+    output_path: Path,
+    tpt_step: int = -1,
+) -> None:
+    """Plots NC1/NC2 (original + full k=0..3 deflation curve), the
+    deflation ratio curves, participation ratio, elongation coefficient,
+    and the between-class alignment check -- everything needed to
+    distinguish "ball-like" from "cylinder-like" within-class collapse."""
+    rows = _load_multiclass_columns(csv_path)
+    if not rows:
+        raise ValueError(f"No multi-class metric rows found in {csv_path}")
+
+    steps = np.asarray([int(row["global_step"]) for row in rows], dtype=np.int64)
+    cols = {name: np.asarray([row[name] for row in rows], dtype=np.float64) for name in _CSV_FIELDS}
+
+    k_colors = {0: "steelblue", 1: "tomato", 2: "darkorange", 3: "seagreen"}
+
+    fig, axes = plt.subplots(4, 2, figsize=(16, 20), sharex=True)
+
+    ax = axes[0, 0]
+    ax.plot(steps, cols["nc1"], linewidth=1.8, label="k=0 (original)", color=k_colors[0])
+    for k in (1, 2, 3):
+        ax.plot(steps, cols[f"nc1_k{k}"], linewidth=1.6, linestyle="--", label=f"k={k}", color=k_colors[k])
+    ax.set_title("NC1(k): Full Deflation Curve")
+    ax.set_ylabel("NC1 (log)")
+    ax.set_yscale("log")
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8)
+
+    ax = axes[0, 1]
+    ax.plot(steps, cols["nc2_deviation"], linewidth=1.8, label="k=0 (original)", color=k_colors[0])
+    for k in (1, 2, 3):
+        ax.plot(steps, cols[f"nc2_k{k}"], linewidth=1.6, linestyle="--", label=f"k={k}", color=k_colors[k])
+    ax.set_title("NC2(k): Full Deflation Curve")
+    ax.set_ylabel("Mean |cos - ETF target|")
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8)
+
+    ax = axes[1, 0]
+    for k in (1, 2, 3):
+        ax.plot(steps, cols[f"nc1_ratio_k{k}"], linewidth=1.6, label=f"k={k}", color=k_colors[k])
+    ax.axhline(1.0, color="black", linestyle=":", linewidth=1.2, label="no change")
+    ax.set_title("NC1 Deflation Ratios: NC1(k) / NC1(0)\n(< 1 supports cylinder-like geometry)")
+    ax.set_ylabel("Ratio")
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8)
+
+    ax = axes[1, 1]
+    for k in (1, 2, 3):
+        ax.plot(steps, cols[f"nc2_ratio_k{k}"], linewidth=1.6, label=f"k={k}", color=k_colors[k])
+    ax.axhline(1.0, color="black", linestyle=":", linewidth=1.2, label="no change")
+    ax.set_title("NC2 Deflation Ratios: NC2(k) / NC2(0)")
+    ax.set_ylabel("Ratio")
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8)
+
+    ax = axes[2, 0]
+    ax.plot(steps, cols["participation_ratio_mean"], linewidth=1.8, color="mediumpurple")
+    ax.set_title("Participation Ratio (mean effective dimensionality)\nball -> ~D, cylinder -> ~1")
+    ax.set_ylabel("PR_c (mean over classes)")
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[2, 1]
+    ax.plot(steps, cols["elongation_mean"], linewidth=1.8, color="crimson")
+    ax.set_title("Elongation Coefficient (mean, lambda_1 / trace(Sigma_c))\nball -> ~1/D, cylinder -> ~1")
+    ax.set_ylabel("e_c (mean over classes)")
+    ax.set_ylim(0.0, 1.02)
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[3, 0]
+    ax.plot(steps, cols["axis_between_class_alignment_mean"], linewidth=1.8, color="teal")
+    ax.set_title("Elongation Axis vs. Between-Class Direction\n(~0: harmless nuisance, ~1: axis carries class signal)")
+    ax.set_xlabel("Global Step")
+    ax.set_ylabel("Mean |cos(axis_c, mu_c - mean)|")
+    ax.set_ylim(0.0, 1.02)
+    ax.grid(True, alpha=0.3)
+
+    axes[3, 1].axis("off")
+
+    if tpt_step >= 0:
+        for r in range(4):
+            for c in range(2):
+                if r == 3 and c == 1:
+                    continue
+                axes[r, c].axvline(tpt_step, color="black", linestyle="-", linewidth=2.0)
+
+    fig.suptitle("Cylinder- vs Ball-Like Collapse: NC(k) Deflation Curve & Shape Metrics", fontsize=16)
     plt.tight_layout(rect=[0.0, 0.0, 1.0, 0.96])
     output_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(output_path, dpi=180, bbox_inches="tight")
