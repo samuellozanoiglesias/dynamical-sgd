@@ -1,0 +1,109 @@
+use_gpu: true
+
+# ---------------------------------------------------------------------------
+# Approach: "pretrained-CNN-features -> metaclasses -> reduced-dim -> MLP-50"
+#
+# Pipeline (in this exact order, see generate_dataset.py):
+#   1. Load native CIFAR-10 (10 classes) and run every image through a REAL,
+#      already-trained CNN checkpoint (data.reduce_source: pretrained_checkpoint
+#      + data.reduce_cnn below) -- frozen, no further training. This is the
+#      SAME checkpoint-loading machinery as model.cnn.pretrained_checkpoint
+#      in the resnet18_cnn/cnn fine-tune path, just used purely as a feature
+#      extractor: only the pre-classifier pooled features are kept, the old
+#      10-way head is discarded.
+#   2. data.reduce_method (pca here) projects those pretrained-CNN features
+#      down to data.reduce_dim dimensions -- this happens BEFORE the
+#      metaclass remap, so the embedding reflects the finer 10-class feature
+#      geometry the checkpoint learned.
+#   3. data.metaclass_mapping then groups the 10 original labels into 3
+#      metaclasses. Only the point LABELS/colors change here -- the
+#      2D/3D coordinates from step 2 are untouched. The saved scatter PNG
+#      (cifar10_reduced_pca_dim2_samples.png) is regenerated at this point
+#      with the metaclass labels, so what you see on disk is exactly what
+#      the model below is trained on: pretrained-CNN-feature points, colored
+#      by the 3 metaclasses.
+#   4. architecture: mlp (nn_width 50, 1 hidden layer) trains on the
+#      resulting tabular (reduce_dim,) dataset -- the same "MLP-50 narrow
+#      shared bottleneck" setup as the spiral/rings synthetic experiments,
+#      just sitting on top of a real, pretrained CNN's feature geometry
+#      instead of raw 2D coordinates or raw pixels.
+#
+# data.reduce_cnn's backbone/checkpoint/pretrained_num_classes/resnet.* MUST
+# match the architecture the checkpoint at reduce_cnn.checkpoint was
+# actually trained with (same rule as model.cnn.pretrained_checkpoint) --
+# update them if you point this at a different checkpoint (e.g. backbone:
+# simple_cnn + the channels/use_batchnorm/fc_hidden_dim from the plain-CNN
+# baseline config instead of resnet18).
+# ---------------------------------------------------------------------------
+
+data:
+  dataset_name: cifar10
+  data_dir: ./data
+  num_classes: 10
+
+  # --- dimensionality reduction, applied BEFORE the metaclass remap above ---
+  reduce_dim: 2                  # try 3 for a slightly less crushed embedding
+  reduce_method: umap             # 'pca' | 'random_projection' | 'umap' | 'tsne'
+  reduce_source: pretrained_checkpoint   # <-- use a real trained CNN's features, frozen
+  reduce_seed: 0
+  reduce_standardize: true       # rescale embedding to ~unit variance per dim
+
+  # --- which checkpoint to load as the (frozen) feature extractor ---
+  reduce_cnn:
+    backbone: resnet18
+    checkpoint: "/mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/without_bumps/cifar10_baseline_cnn/training_2026_07_22-12_47_11/model_weights.pt"
+    pretrained_num_classes: 10   # classes the checkpoint's head was trained with
+    resnet:
+      num_stages: 4
+      blocks_per_stage: [2, 2, 2, 2]   # "resnet18" -- must match the checkpoint
+      width_mult: 1.0
+
+model:
+  architecture: mlp
+  init_type: glorot
+  nn_width: 50                 # the narrow shared bottleneck, matching MLP-50
+  num_hidden_layers: 1         # single layer, matching the spiral/rings setup
+  use_bias: true
+
+training:
+  training_steps: 20000
+  save_metrics_every_n_steps: 50
+  batch_size: 128
+  random_seed: 42
+  loss: cross_entropy
+
+optimizer:
+  optimizer_type: sgd
+  learning_rate: 0.05
+  momentum: 0.9
+  weight_decay: 5.0e-4
+  gradient_clipping: null
+  nesterov: false
+
+dynamics:
+  bumps_before_tpt: true   # set true to test the oscillation effect against this baseline
+  bumps_at_tpt: true
+  period_length: 200
+  w_max: 20.0
+  amplitude: 1.0
+  bump_order:
+  tpt_accuracy_threshold: 1.0
+
+analysis:
+  metric_subset_size: 5000
+  plot_version: simplified
+  compute_results: average
+  outputs:
+    classifier_metrics: false
+    nc_metrics: false
+    separability_metrics: false
+    pca_analysis: false
+    pca_geometric: false
+    hyperplane_metrics: false
+    proj_nc_analysis: false
+    multiclass_metrics: true
+  pca:
+    projected_dims: [1, 2, 3, 5]
+
+output:
+  output_dir: /data/samuel_lozano/dynamical-sgd

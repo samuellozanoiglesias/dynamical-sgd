@@ -1,0 +1,73 @@
+# Idea 1: train a CNN FROM SCRATCH on CIFAR-10 images, but relabeled into
+# 3 metaclasses. The network never sees the original 10 fine labels -- only
+# which of the 3 coarse groups each image belongs to. 
+#
+# Default grouping (edit data.metaclass_mapping to try a different one):
+#   metaclass 0 = vehicles          -> airplane(0), automobile(1), ship(8), truck(9)
+#   metaclass 1 = large mammals     -> cat(3), deer(4), dog(5), horse(7)
+#   metaclass 2 = bird + frog       -> bird(2), frog(6)
+#
+# Run:
+#   python launch.py --config config/cifar10_metaclasses_scratch.yaml --mode single
+
+use_gpu: true
+
+data:
+  dataset_name: cifar10
+  data_dir: ./data
+  num_classes: 3
+  metaclass_mapping:
+   - [0, 1, 2]   
+   - [3, 4, 5] 
+   - [6, 7, 8, 9]
+
+model:
+  architecture: resnet18_cnn
+  cnn:
+    backbone: resnet18
+    resnet:
+      num_stages: 4
+      blocks_per_stage: [2, 2, 2, 2]
+      width_mult: 1.0
+
+training:
+  training_steps: 15000
+  save_metrics_every_n_steps: 1
+  batch_size: 128
+  random_seed: 42
+  loss: cross_entropy
+
+optimizer:
+  optimizer_type: sgd
+  learning_rate: 0.0679
+  momentum: 0.9
+  weight_decay: 0.0005
+  gradient_clipping: null
+  nesterov: false
+
+dynamics:
+  bumps_before_tpt: false
+  bumps_at_tpt: false
+
+analysis:
+  metric_subset_size: 5000
+  plot_version: simplified
+  compute_results: average
+  outputs:
+    classifier_metrics: false
+    nc_metrics: false
+    separability_metrics: false
+    pca_analysis: false
+    pca_geometric: false
+    hyperplane_metrics: false
+    proj_nc_analysis: false
+    multiclass_metrics: true
+  pca:
+    projected_dims:
+    - 1
+    - 2
+    - 3
+    - 5
+
+output:
+  output_dir: /data/samuel_lozano/dynamical-sgd

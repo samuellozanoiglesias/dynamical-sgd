@@ -1,0 +1,77 @@
+# Start from a CNN that ALREADY KNOWS CIFAR-10 (10 fine classes),
+# replace its classifier head with a fresh 3-way head, and retrain
+# (fine-tune) on the 3 metaclasses. 
+#
+# Prerequisite: run config/cifar10_baseline_cnn.yaml first (or point at any
+# existing 10-class CIFAR-10 run of yours) to get a model_weights.pt, then
+# fill in model.cnn.pretrained_checkpoint below with that path, e.g.:
+#   outputs/without_bumps/cifar10_baseline_cnn/training_2026_07_22-12_00_00/model_weights.pt
+#
+# Run:
+#   python launch.py --config config/cifar10_metaclasses_finetune.yaml --mode single
+
+use_gpu: true
+
+data:
+  dataset_name: cifar10
+  data_dir: ./data
+  num_classes: 3
+  metaclass_mapping:
+   - [0, 1, 2]   
+   - [3, 4, 5] 
+   - [6, 7, 8, 9]
+
+model:
+  architecture: resnet18_cnn
+  cnn:
+    backbone: resnet18
+    resnet:
+      num_stages: 4
+      blocks_per_stage: [2, 2, 2, 2]   # "resnet18"
+      width_mult: 1.0
+    # --- pretrained-model knobs (new) ---
+    pretrained_checkpoint: "/mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/without_bumps/cifar10_baseline_cnn/training_2026_07_22-12_47_11/model_weights.pt"
+    pretrained_num_classes: 10   # classes the checkpoint's head was trained with
+    freeze_backbone: false      # true = linear-probe the frozen backbone; false = fine-tune everything
+
+training:
+  training_steps: 5000
+  save_metrics_every_n_steps: 1
+  batch_size: 128
+  random_seed: 42
+  loss: cross_entropy
+
+optimizer:
+  optimizer_type: sgd
+  learning_rate: 0.0679
+  momentum: 0.9
+  weight_decay: 0.0005
+  gradient_clipping: null
+  nesterov: false
+
+dynamics:
+  bumps_before_tpt: false
+  bumps_at_tpt: false
+
+analysis:
+  metric_subset_size: 5000
+  plot_version: simplified
+  compute_results: average
+  outputs:
+    classifier_metrics: false
+    nc_metrics: false
+    separability_metrics: false
+    pca_analysis: false
+    pca_geometric: false
+    hyperplane_metrics: false
+    proj_nc_analysis: false
+    multiclass_metrics: true
+  pca:
+    projected_dims:
+    - 1
+    - 2
+    - 3
+    - 5
+
+output:
+  output_dir: /data/samuel_lozano/dynamical-sgd

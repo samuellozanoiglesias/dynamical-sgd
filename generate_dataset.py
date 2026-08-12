@@ -659,6 +659,122 @@ def _save_2d_dataset_visualizations(
     plt.close()
 
 
+def _save_3d_dataset_visualizations(
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    x_test: np.ndarray,
+    y_test: np.ndarray,
+    num_classes: int,
+    out_dir: Path,
+    title_prefix: str,
+    output_name: str,
+) -> None:
+    """3D counterpart of `_save_2d_dataset_visualizations`. Plots the first
+    three columns of x_train/x_test as a 3D scatter (train | test side by
+    side), color-coded by class. Requires x_train.shape[1] >= 3 -- callers
+    are expected to have validated `plot_dim` against `reduce_dim` already
+    (see `_resolve_plot_dim`)."""
+    # Local import: mpl_toolkits.mplot3d registers the '3d' projection as a
+    # side effect of being imported. Newer matplotlib versions auto-register
+    # it, but importing explicitly keeps this working on older versions too.
+    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+
+    fig = plt.figure(figsize=(14, 6))
+    ax0 = fig.add_subplot(1, 2, 1, projection="3d")
+    ax1 = fig.add_subplot(1, 2, 2, projection="3d")
+    cmap = plt.get_cmap("tab10")
+
+    for class_id in range(num_classes):
+        mask = y_train == class_id
+        if np.any(mask):
+            ax0.scatter(
+                x_train[mask, 0],
+                x_train[mask, 1],
+                x_train[mask, 2],
+                s=12,
+                alpha=0.9,
+                color=cmap(class_id % 10),
+                edgecolors="black",
+                linewidths=0.2,
+                label=f"Class {class_id}",
+            )
+    ax0.set_title(f"{title_prefix} Training Samples")
+    ax0.legend(ncol=2, fontsize=8)
+
+    for class_id in range(num_classes):
+        mask = y_test == class_id
+        if np.any(mask):
+            ax1.scatter(
+                x_test[mask, 0],
+                x_test[mask, 1],
+                x_test[mask, 2],
+                s=12,
+                alpha=0.9,
+                color=cmap(class_id % 10),
+                edgecolors="black",
+                linewidths=0.2,
+                label=f"Class {class_id}",
+            )
+    ax1.set_title(f"{title_prefix} Test Samples")
+    ax1.legend(ncol=2, fontsize=8)
+
+    plt.tight_layout()
+    plt.savefig(out_dir / output_name, dpi=150, bbox_inches="tight")
+    plt.close()
+
+
+def _resolve_plot_dim(data_cfg: dict, reduce_dim: int) -> int:
+    """Resolves data.plot_dim (2 or 3) -- the dimensionality actually drawn
+    in the scatter plot -- defaulting to a 2D plot (the original, unchanged
+    behavior) unless the user explicitly asks for 3D. plot_dim can never
+    exceed reduce_dim (you can't plot a 3rd axis that doesn't exist)."""
+    plot_dim = int(data_cfg.get("plot_dim", 2))
+    if plot_dim not in (2, 3):
+        raise ValueError(f"data.plot_dim must be 2 or 3, got {plot_dim}.")
+    if plot_dim > reduce_dim:
+        raise ValueError(
+            f"data.plot_dim ({plot_dim}) cannot exceed data.reduce_dim ({reduce_dim}). "
+            "Use reduce_dim >= 3 to enable a 3D plot."
+        )
+    return plot_dim
+
+
+def _reduced_plot_output_name(
+    dataset_label: str, reduce_method: str, reduce_dim: int, plot_dim: int
+) -> str:
+    """Shared filename convention for reduced-dim scatter plots. 2D plots
+    keep the original (pre-3D-support) filename unchanged; 3D plots get an
+    explicit '_3d' suffix so the two never collide/overwrite each other."""
+    suffix = "_3d" if plot_dim == 3 else ""
+    return f"{dataset_label.lower()}_reduced_{reduce_method}_dim{reduce_dim}_samples{suffix}.png"
+
+
+def _save_reduced_dataset_visualizations(
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    x_test: np.ndarray,
+    y_test: np.ndarray,
+    num_classes: int,
+    out_dir: Path,
+    title_prefix: str,
+    output_name: str,
+    plot_dim: int = 2,
+) -> None:
+    """Dispatches to the 2D or 3D scatter-plot saver based on `plot_dim`."""
+    if plot_dim == 3:
+        _save_3d_dataset_visualizations(
+            x_train=x_train, y_train=y_train, x_test=x_test, y_test=y_test,
+            num_classes=num_classes, out_dir=out_dir,
+            title_prefix=title_prefix, output_name=output_name,
+        )
+    else:
+        _save_2d_dataset_visualizations(
+            x_train=x_train, y_train=y_train, x_test=x_test, y_test=y_test,
+            num_classes=num_classes, out_dir=out_dir,
+            title_prefix=title_prefix, output_name=output_name,
+        )
+
+
 def save_spiral_visualizations(
     x_train: np.ndarray,
     y_train: np.ndarray,
@@ -897,6 +1013,24 @@ def _normalize_image_batch(images_u8: np.ndarray, mean: tuple, std: tuple) -> np
 #                         convergence, since a fully-trained/collapsed
 #                         backbone would hand the classes to you already
 #                         linearly separable -- defeating the point.
+#     "pretrained_checkpoint" -- pooled (pre-classifier) features of a REAL,
+#                         already-trained CNN checkpoint (e.g. model_weights.pt
+#                         saved by a previous run_training call with
+#                         architecture: cnn / resnet18_cnn on the native
+#                         10-way labels). The backbone is loaded and used
+#                         frozen, purely as a feature extractor -- no
+#                         training happens here. Configure it via
+#                         data.reduce_cnn (backbone, checkpoint,
+#                         pretrained_num_classes, plus that backbone's usual
+#                         architecture knobs -- see _pretrained_checkpoint_features
+#                         below). Combine with data.metaclass_mapping to get
+#                         "features from a CNN trained on the 10 original
+#                         classes, then grouped into a handful of metaclasses,
+#                         then reduced to 2-3D and plotted/trained on" --
+#                         reduction runs BEFORE the metaclass remap (below),
+#                         so the embedding reflects the finer 10-class feature
+#                         geometry, only the point *labels/colors* change to
+#                         the coarser metaclasses.
 #
 #   data.reduce_method -- the actual dimensionality-reduction algorithm:
 #     "pca"              -- linear, preserves global variance. Fast, but on
@@ -936,7 +1070,7 @@ def _normalize_image_batch(images_u8: np.ndarray, mean: tuple, std: tuple) -> np
 # ---------------------------------------------------------------------------
 
 _VALID_REDUCE_METHODS = {"pca", "random_projection", "umap", "tsne"}
-_VALID_REDUCE_SOURCES = {"pixels", "frozen_cnn", "pretrained_cnn"}
+_VALID_REDUCE_SOURCES = {"pixels", "frozen_cnn", "pretrained_cnn", "pretrained_checkpoint"}
 
 
 def _pca_fit_transform(
@@ -1078,6 +1212,118 @@ def _pretrained_cnn_features(
     return _run(x_train_img), _run(x_test_img)
 
 
+def _pretrained_checkpoint_features(
+    x_train_img: np.ndarray,
+    x_test_img: np.ndarray,
+    cnn_cfg: dict,
+    batch_size: int = 256,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Runs both splits through a REAL CNN backbone (resnet18 / simple_cnn /
+    myrtle -- the exact same builders model.py's `architecture: cnn` /
+    `resnet18_cnn` path uses) with weights loaded from an already-trained
+    checkpoint (a model_weights.pt saved by a previous run_training call),
+    and returns the FROZEN pre-classifier pooled features. No training
+    happens here -- this is pure feature extraction, unlike
+    `_pretrained_cnn_features` above which trains a small ad hoc net for a
+    couple epochs from scratch. `cnn_cfg` (data.reduce_cnn in the config)
+    uses the same keys as model.cnn in a training config:
+
+      backbone               -- 'resnet18' | 'simple_cnn' | 'myrtle'
+      checkpoint              -- path to the model_weights.pt to load (required)
+      pretrained_num_classes -- class count the checkpoint's head was
+                                 trained with (e.g. 10 for native CIFAR-10);
+                                 only used to build a matching-shape
+                                 classifier layer so load_state_dict lines up
+                                 -- the classifier itself is discarded, only
+                                 the pre-classifier pooled features are read.
+      plus that backbone's usual architecture knobs (channels/kernel_size/
+      use_batchnorm/pool_every_block/dropout/fc_hidden_dim for simple_cnn;
+      resnet.blocks_per_stage/num_stages/width_mult for resnet18; myrtle.*
+      for myrtle) -- these MUST match the checkpoint's original training
+      config, exactly like model.cnn.pretrained_checkpoint's fine-tune path
+      in training_runner.py.
+
+    Lazy imports (torch + model_cnn), like `_frozen_cnn_features` /
+    `_pretrained_cnn_features` above."""
+    import torch
+    from model_cnn import build_cnn_model, build_myrtle_cnn_model, build_simple_cnn_model
+
+    checkpoint_path = cnn_cfg.get("checkpoint")
+    if not checkpoint_path:
+        raise ValueError(
+            "data.reduce_source == 'pretrained_checkpoint' requires "
+            "data.reduce_cnn.checkpoint (path to a model_weights.pt saved by "
+            "a previous training run)."
+        )
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    backbone_name = str(cnn_cfg.get("backbone", "simple_cnn")).strip().lower()
+    pretrained_num_classes = int(cnn_cfg.get("pretrained_num_classes", 10))
+    input_ch = int(x_train_img.shape[1])
+
+    if backbone_name == "resnet18":
+        resnet_cfg = cnn_cfg.get("resnet", {}) or {}
+        model, _classifier, capture = build_cnn_model(
+            num_classes=pretrained_num_classes, input_ch=input_ch, device=device,
+            blocks_per_stage=tuple(
+                int(b) for b in resnet_cfg.get("blocks_per_stage", [2, 2, 2, 2])
+            ),
+            num_stages=int(resnet_cfg.get("num_stages", 4)),
+            width_mult=float(resnet_cfg.get("width_mult", 1.0)),
+        )
+    elif backbone_name == "simple_cnn":
+        fc_hidden_dim_raw = cnn_cfg.get("fc_hidden_dim")
+        model, _classifier, capture = build_simple_cnn_model(
+            num_classes=pretrained_num_classes, input_ch=input_ch, device=device,
+            channels=[int(c) for c in cnn_cfg.get("channels", [16, 32])],
+            kernel_size=int(cnn_cfg.get("kernel_size", 3)),
+            use_batchnorm=_as_bool_local(cnn_cfg.get("use_batchnorm", True)),
+            pool_every_block=_as_bool_local(cnn_cfg.get("pool_every_block", True)),
+            dropout=float(cnn_cfg.get("dropout", 0.0)),
+            fc_hidden_dim=int(fc_hidden_dim_raw) if fc_hidden_dim_raw else None,
+        )
+    elif backbone_name == "myrtle":
+        myrtle_cfg = cnn_cfg.get("myrtle", {}) or {}
+        blocks_per_stage_raw = myrtle_cfg.get("blocks_per_stage")
+        channels_raw = myrtle_cfg.get("channels")
+        model, _classifier, capture = build_myrtle_cnn_model(
+            num_classes=pretrained_num_classes, input_ch=input_ch, device=device,
+            base_width=int(myrtle_cfg.get("base_width", 64)),
+            num_stages=int(myrtle_cfg.get("num_stages", 4)),
+            blocks_per_stage=(
+                [int(b) for b in blocks_per_stage_raw] if blocks_per_stage_raw else None
+            ),
+            channels=[int(c) for c in channels_raw] if channels_raw else None,
+            kernel_size=int(myrtle_cfg.get("kernel_size", 3)),
+            use_batchnorm=_as_bool_local(myrtle_cfg.get("use_batchnorm", True)),
+            pool_last_stage=_as_bool_local(myrtle_cfg.get("pool_last_stage", True)),
+            dropout=float(myrtle_cfg.get("dropout", 0.0)),
+        )
+    else:
+        raise ValueError(
+            f"data.reduce_cnn.backbone '{backbone_name}' not recognized. "
+            "Expected 'resnet18', 'simple_cnn', or 'myrtle'."
+        )
+
+    checkpoint = torch.load(str(checkpoint_path), map_location=device)
+    state_dict = checkpoint["torch_model"] if "torch_model" in checkpoint else checkpoint
+    model.load_state_dict(state_dict)
+    model.eval()
+
+    def _run(x_img: np.ndarray) -> np.ndarray:
+        feats: list[np.ndarray] = []
+        with torch.no_grad():
+            for start in range(0, x_img.shape[0], batch_size):
+                batch = torch.as_tensor(
+                    x_img[start:start + batch_size], dtype=torch.float32, device=device
+                )
+                model(batch)  # forward hook populates `capture.value` (pre-classifier features)
+                feats.append(capture.value.reshape(batch.shape[0], -1).cpu().numpy())
+        return np.concatenate(feats, axis=0)
+
+    return _run(x_train_img), _run(x_test_img)
+
+
 def _umap_fit_transform(
     train_feats: np.ndarray, test_feats: np.ndarray, reduce_dim: int, seed: int
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -1156,6 +1402,7 @@ def _fit_transform_dim_reduction(
     y_train_img: np.ndarray | None = None,
     num_classes: int | None = None,
     pretrain_epochs: int = 2,
+    cnn_cfg: dict | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Top-level entry point for the reduction. x_*_img are the already
     normalized (N, C, H, W) float32 image arrays; returns (N, reduce_dim)
@@ -1163,7 +1410,8 @@ def _fit_transform_dim_reduction(
 
     `source` selects the feature space the `method` operates on (see the big
     comment above this section); `pretrain_epochs` only applies when
-    source == 'pretrained_cnn'."""
+    source == 'pretrained_cnn'; `cnn_cfg` (data.reduce_cnn) only applies when
+    source == 'pretrained_checkpoint'."""
     if method not in _VALID_REDUCE_METHODS:
         raise ValueError(
             f"data.reduce_method '{method}' not recognized. "
@@ -1184,6 +1432,12 @@ def _fit_transform_dim_reduction(
         test_feat = x_test_img.reshape(n_test, -1).astype(np.float64)
     elif source == "frozen_cnn":
         feats_train, feats_test = _frozen_cnn_features(x_train_img, x_test_img, seed=seed)
+        train_feat = feats_train.astype(np.float64)
+        test_feat = feats_test.astype(np.float64)
+    elif source == "pretrained_checkpoint":
+        feats_train, feats_test = _pretrained_checkpoint_features(
+            x_train_img, x_test_img, cnn_cfg=cnn_cfg or {},
+        )
         train_feat = feats_train.astype(np.float64)
         test_feat = feats_test.astype(np.float64)
     else:  # pretrained_cnn
@@ -1329,6 +1583,7 @@ def _load_cifar10_bundle(data_cfg: dict, output_dir: Path) -> DatasetBundle:
         reduce_seed = int(data_cfg.get("reduce_seed", 0))
         reduce_standardize = _as_bool_local(data_cfg.get("reduce_standardize", True))
         reduce_pretrain_epochs = int(data_cfg.get("reduce_pretrain_epochs", 2))
+        reduce_cnn_cfg = data_cfg.get("reduce_cnn", {}) or {}
 
         # umap/tsne (especially tsne, which is transductive over train+test
         # combined) get expensive at full CIFAR-10 scale -- optionally
@@ -1346,14 +1601,18 @@ def _load_cifar10_bundle(data_cfg: dict, output_dir: Path) -> DatasetBundle:
             method=reduce_method, reduce_dim=reduce_dim,
             seed=reduce_seed, standardize=reduce_standardize,
             source=reduce_source, y_train_img=y_train, num_classes=num_classes,
-            pretrain_epochs=reduce_pretrain_epochs,
+            pretrain_epochs=reduce_pretrain_epochs, cnn_cfg=reduce_cnn_cfg,
         )
 
         if reduce_dim >= 2:
-            _save_2d_dataset_visualizations(
+            plot_dim = _resolve_plot_dim(data_cfg, reduce_dim)
+            _save_reduced_dataset_visualizations(
                 x_train, y_train, x_test, y_test, num_classes, output_dir,
                 title_prefix=f"CIFAR-10 -> {reduce_method} dim={reduce_dim}",
-                output_name=f"cifar10_reduced_{reduce_method}_dim{reduce_dim}_samples.png",
+                output_name=_reduced_plot_output_name(
+                    "cifar10", reduce_method, reduce_dim, plot_dim
+                ),
+                plot_dim=plot_dim,
             )
 
         input_shape: tuple[int, ...] = (reduce_dim,)
@@ -1953,11 +2212,15 @@ def remap_to_metaclasses(
             reduce_dim = int(reduce_dim_raw)
             reduce_method = str(data_cfg.get("reduce_method", "pca")).strip().lower()
             if reduce_dim >= 2:
-                _save_2d_dataset_visualizations(
+                plot_dim = _resolve_plot_dim(data_cfg, reduce_dim)
+                _save_reduced_dataset_visualizations(
                     bundle.train_inputs, y_train_meta, bundle.test_inputs, y_test_meta,
                     num_metaclasses, output_dir,
                     title_prefix=f"{dataset_label} -> {reduce_method} dim={reduce_dim} (metaclasses)",
-                    output_name=f"{dataset_label.lower()}_reduced_{reduce_method}_dim{reduce_dim}_samples.png",
+                    output_name=_reduced_plot_output_name(
+                        dataset_label, reduce_method, reduce_dim, plot_dim
+                    ),
+                    plot_dim=plot_dim,
                 )
 
     return DatasetBundle(
