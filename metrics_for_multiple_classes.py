@@ -29,6 +29,18 @@ loop over classes or class pairs):
   * nc1_ratio_k{1,2,3}, nc2_ratio_k{1,2,3}          (deflated / original,
     i.e. NC(k) / NC(0). Ratio << 1 for any k is evidence of cylinder-like
     rather than ball-like within-class geometry.)
+  * pca_k95, pca_k99, pca_gap                        (per-step time series of
+    the "danger frontier" PCA diagnostic, previously only computed offline
+    at the final checkpoint by PCA_explained_within_class.py. Computed on
+    the pooled WITHIN-class-deflated covariance, i.e. the same `deltas`
+    (features minus each sample's own class mean) already built above for
+    NC1/NC2 -- so this reuses existing per-sample work and removes the
+    between-class confound the same way the offline script does. pca_k95 /
+    pca_k99 are the number of principal components needed to reach 95% /
+    99% cumulative explained variance of that within-class covariance;
+    pca_gap = pca_k99 - pca_k95. Watching this per step (instead of only at
+    the final checkpoint) lets you see the gap open up over training and
+    line it up against participation_ratio_mean.)
 
 Vectorization notes
 --------------------
@@ -51,6 +63,12 @@ Vectorization notes
   for every k in one shot, instead of K separate projection passes.
 - The whole pipeline is wrapped in a single `jax.jit` (static on
   `num_classes`), so one call = one compiled program on the device.
+- pca_k95/pca_k99/pca_gap add exactly ONE extra eigh: a single (non-batched)
+  D x D eigh of the pooled within-class covariance built from `deltas`
+  (already computed for NC1/NC2). This is the same order of cost as any one
+  slice of the existing (C, D, D) batched per-class eigh above -- cheap
+  relative to the pairwise Bhattacharyya solves, which remain the dominant
+  cost in this module.
 
 Caveat: the pairwise Bhattacharyya step builds a (C, C, D, D) tensor and
 solves C*C batched DxD linear systems. This is very fast for typical
@@ -110,6 +128,9 @@ class MultiClassEpochRaw:
     nc2_ratio_k3: float
     sensitive_param_fraction: float
     mean_weight_step_distance: float
+    pca_k95: float
+    pca_k99: float
+    pca_gap: float
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +295,27 @@ def _compute_multiclass_core(
         nc1_curve.append(nc1_k)
         nc2_curve.append(nc2_k)
 
+    # ---- within-class PCA "danger frontier" diagnostic: k95 / k99 / gap ----
+    # `deltas` (features minus each sample's own class mean) is already
+    # zero-mean globally by construction, so no extra centering is needed.
+    # This single global D x D eigh mirrors what
+    # PCA_explained_within_class.py does offline at the final checkpoint,
+    # but folded into the per-step training loop as one more (cheap) eigh
+    # call reusing data already computed above.
+    within_class_cov = (deltas.T @ deltas) / jnp.maximum(N - C, 1.0)
+    within_eigvals = jnp.linalg.eigh(within_class_cov)[0]               # ascending
+    within_eigvals_desc = jnp.clip(within_eigvals[::-1], 0.0, None)
+    within_explained_ratio = within_eigvals_desc / (jnp.sum(within_eigvals_desc) + EPS)
+    within_cumulative = jnp.cumsum(within_explained_ratio)
+
+    def _k_at_threshold(cumulative_: jnp.ndarray, threshold: float) -> jnp.ndarray:
+        idx = jnp.searchsorted(cumulative_, threshold, side="left")
+        return jnp.clip(idx + 1, 1, D).astype(jnp.float32)
+
+    pca_k95 = _k_at_threshold(within_cumulative, 0.95)
+    pca_k99 = _k_at_threshold(within_cumulative, 0.99)
+    pca_gap = pca_k99 - pca_k95
+
     out = {
         "nc1": nc1,
         "nc2": nc2,
@@ -285,6 +327,9 @@ def _compute_multiclass_core(
         "participation_ratio_mean": participation_ratio_mean,
         "elongation_mean": elongation_mean,
         "axis_between_class_alignment_mean": axis_between_class_alignment_mean,
+        "pca_k95": pca_k95,
+        "pca_k99": pca_k99,
+        "pca_gap": pca_gap,
     }
     for k in range(1, DEFLATION_MAX_K + 1):
         out[f"nc1_k{k}"] = nc1_curve[k]
@@ -369,6 +414,9 @@ def collect_multiclass_epoch(
         nc2_ratio_k3=result["nc2_ratio_k3"],
         sensitive_param_fraction=sensitive_param_fraction,
         mean_weight_step_distance=mean_weight_step_distance,
+        pca_k95=result["pca_k95"],
+        pca_k99=result["pca_k99"],
+        pca_gap=result["pca_gap"],
     )
 
 
@@ -401,6 +449,9 @@ _CSV_FIELDS: list[str] = [
     "nc2_ratio_k3",
     "sensitive_param_fraction",
     "mean_weight_step_distance",
+    "pca_k95",
+    "pca_k99",
+    "pca_gap",
 ]
 
 
@@ -597,13 +648,19 @@ def finalize_shape_metrics_plots(
     ax.set_ylim(0.0, 1.02)
     ax.grid(True, alpha=0.3)
 
-    axes[3, 1].axis("off")
+    ax = axes[3, 1]
+    ax.plot(steps, cols["pca_k95"], linewidth=1.8, label="k95", color="steelblue")
+    ax.plot(steps, cols["pca_k99"], linewidth=1.8, label="k99", color="firebrick")
+    ax.fill_between(steps, cols["pca_k95"], cols["pca_k99"], color="firebrick", alpha=0.15, label="gap")
+    ax.set_title("Within-Class PCA Danger Frontier: k95 / k99 (# components)\ngap = k99 - k95, widens as collapse sharpens")
+    ax.set_xlabel("Global Step")
+    ax.set_ylabel("# principal components")
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8)
 
     if tpt_step >= 0:
         for r in range(4):
             for c in range(2):
-                if r == 3 and c == 1:
-                    continue
                 axes[r, c].axvline(tpt_step, color="black", linestyle="-", linewidth=2.0)
 
     fig.suptitle("Cylinder- vs Ball-Like Collapse: NC(k) Deflation Curve & Shape Metrics", fontsize=16)

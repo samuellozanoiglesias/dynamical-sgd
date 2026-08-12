@@ -1,0 +1,83 @@
+use_gpu: true
+
+# ---------------------------------------------------------------------------
+# Approach 1: strip BatchNorm + skip connections, add a narrow shared FC
+# bottleneck before the classifier.
+#
+# architecture: cnn / backbone: simple_cnn already gives everything this
+# needs with no code changes:
+#   - SimpleCNN has no residual/skip connections at all (plain sequential
+#     conv -> [bn] -> relu -> [pool] stack), unlike resnet18/myrtle.
+#   - cnn.use_batchnorm: false removes the per-channel renormalization that
+#     (per the "why isn't the effect showing up" hypothesis) may be routing
+#     around the stuck-without-oscillation failure mode.
+#   - cnn.fc_hidden_dim: 50 inserts a single narrow (width-50) FC layer
+#     between the pooled conv features and the 10-way classifier -- the same
+#     "everything funnels through one narrow shared layer" structure as the
+#     MLP-50 spiral/rings case, just sitting on top of conv features instead
+#     of raw 2D coordinates.
+#
+# To test the oscillation effect itself, flip dynamics.bumps_before_tpt to
+# true (keep everything else fixed) and compare train/test curves + NC
+# metrics against this no-bumps baseline.
+# ---------------------------------------------------------------------------
+
+data:
+  dataset_name: cifar10
+  data_dir: ./data
+  num_classes: 10
+
+model:
+  architecture: cnn
+  init_type: glorot     # unused by the torch CNN path; kept for config-schema consistency
+  cnn:
+    backbone: simple_cnn
+    channels: [16, 32, 64]      # 3 conv stages, doubling width -- "3-4 conv layers, no BN"
+    kernel_size: 3
+    use_batchnorm: false          # <-- the landscape-smoothing mechanism under test
+    pool_every_block: true
+    dropout: 0.0
+    fc_hidden_dim: 50             # <-- the narrow shared bottleneck under test
+
+training:
+  training_steps: 20000
+  save_metrics_every_n_steps: 50
+  batch_size: 128
+  random_seed: 42
+  loss: cross_entropy
+
+optimizer:
+  optimizer_type: sgd
+  learning_rate: 0.05
+  momentum: 0.9
+  weight_decay: 5.0e-4
+  gradient_clipping: null
+  nesterov: false
+
+dynamics:
+  bumps_before_tpt: false   # set true to test the oscillation effect against this baseline
+  bumps_at_tpt: false
+  period_length: 500
+  w_max: 70.0
+  amplitude: 1.0
+  bump_order:
+  tpt_accuracy_threshold: 1.0
+
+analysis:
+  metric_subset_size: 5000
+  plot_version: simplified
+  compute_results: average
+  outputs:
+    classifier_metrics: false
+    nc_metrics: false
+    separability_metrics: false
+    pca_analysis: false
+    pca_geometric: false
+    hyperplane_metrics: false
+    proj_nc_analysis: false
+    multiclass_metrics: true
+  pca:
+    projected_dims: [1, 2, 3, 5]
+
+output:
+  output_dir: /data/samuel_lozano/dynamical-sgd

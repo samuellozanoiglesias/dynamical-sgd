@@ -16,7 +16,7 @@ source ~/.bashrc
 conda activate dynamical-sgd
 cd /mnt/lustre/home/samuloza/dynamical-sgd/
 
-config_file="config/CIFAR10/cifar10_resnet_narrow_4-always_bumps.yaml"
+config_file="config/CIFAR10/cifar10_myrtle5-always_bumps.yaml"
 BASE_OUTPUT_DIR=/mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/gridsearch_wmaxs_periods
 mkdir -p "$BASE_OUTPUT_DIR"
 
@@ -29,7 +29,7 @@ PERIODS=(1 5 10 20 50 100 200 400 800 1000 1200 1500 1800 2000)     # -> dynamic
 # ==========================================
 # Concurrency — set this from probe_gpu_parallelism.sbatch results
 # ==========================================
-MAX_PARALLEL=6
+MAX_PARALLEL=14
 
 # ==========================================
 # JAX memory behavior

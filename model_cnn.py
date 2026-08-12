@@ -288,6 +288,143 @@ def build_simple_cnn_model(
     return model, classifier, capture
 
 
+# ---------------------------------------------------------------------------
+# Myrtle-family CNN (Shankar et al., 2020; used for the CIFAR-10 experiments
+# in Ruiz-Garcia et al. 2021, "Tilting the playing field: Dynamical loss
+# functions for machine learning"). This is ONLY the network architecture --
+# a VGG-style stack of conv-bn-relu stages with 2x2 maxpools between stages,
+# global-average-pooling, and a linear classifier. It carries no dynamical
+# loss / Gamma-weighting logic whatsoever; that mechanism (Eq. 1-5 of the
+# paper) is intentionally NOT implemented here. The existing bump-sampling
+# oscillation mechanism already in train_epoch_cnn / _compute_class_probabilities
+# is architecture-agnostic and works with this backbone unchanged, so it can
+# be used as a drop-in alternative to the paper's dynamical loss for testing
+# against the same base network they used.
+#
+# "Myrtle5" in the paper = 4 conv stages (channels doubling 64->128->256->512
+# by default) + 1 linear classifier = 5 weight layers. Width and depth are
+# both configurable from the yaml: `base_width` sets the channel count of the
+# first stage (channels double each stage after that, matching the paper's
+# "64 channels instead of 1024"); `num_stages` sets how many such stages
+# exist (4 -> "Myrtle5"); `blocks_per_stage` optionally adds more than one
+# conv layer per stage before pooling (e.g. for deeper "Myrtle7/10"-style
+# variants) without changing the width-doubling schedule.
+# ---------------------------------------------------------------------------
+
+class MyrtleCNN(nn.Module):
+    """Configurable Myrtle-style CNN. Stage i has `blocks_per_stage[i]`
+    conv(kernel_size)->[batchnorm]->relu layers at width `channels[i]`,
+    followed by a 2x2 maxpool (skipped after the last stage unless
+    `pool_last_stage=True`). Ends in global-average-pooling -> [dropout] ->
+    a linear classifier kept as `self.fc`, same convention as SimpleCNN /
+    resnet18 so the rest of the pipeline (forward hook, TorchModelAdapter,
+    train_epoch_cnn) needs zero changes to use this backbone."""
+
+    def __init__(
+        self,
+        num_classes: int,
+        in_channels: int,
+        channels: list[int],
+        blocks_per_stage: list[int] | None = None,
+        kernel_size: int = 3,
+        use_batchnorm: bool = True,
+        pool_last_stage: bool = True,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+        if not channels:
+            raise ValueError("MyrtleCNN requires at least one entry in `channels`.")
+        if blocks_per_stage is None:
+            blocks_per_stage = [1] * len(channels)
+        if len(blocks_per_stage) != len(channels):
+            raise ValueError(
+                "blocks_per_stage must have the same length as channels "
+                f"(got {len(blocks_per_stage)} vs {len(channels)})."
+            )
+
+        layers: list[nn.Module] = []
+        prev_c = in_channels
+        n_stages = len(channels)
+        for stage_idx, (c, n_blocks) in enumerate(zip(channels, blocks_per_stage)):
+            for _ in range(n_blocks):
+                layers.append(
+                    nn.Conv2d(prev_c, c, kernel_size, padding=kernel_size // 2, bias=not use_batchnorm)
+                )
+                if use_batchnorm:
+                    layers.append(nn.BatchNorm2d(c))
+                layers.append(nn.ReLU(inplace=True))
+                prev_c = c
+            is_last_stage = stage_idx == n_stages - 1
+            if not is_last_stage or pool_last_stage:
+                layers.append(nn.MaxPool2d(2))
+        self.features = nn.Sequential(*layers)
+
+        # Adaptive pool so this works regardless of input spatial size or
+        # how many 2x2 maxpools happened along the way (mirrors SimpleCNN).
+        self.global_pool = nn.AdaptiveAvgPool2d(1)
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        self.fc = nn.Linear(prev_c, num_classes)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.features(x)
+        x = self.global_pool(x).flatten(1)
+        x = self.dropout(x)
+        return self.fc(x)
+
+
+def build_myrtle_cnn_model(
+    num_classes: int,
+    input_ch: int,
+    device: torch.device,
+    base_width: int = 64,
+    num_stages: int = 4,
+    blocks_per_stage: list[int] | None = None,
+    channels: list[int] | None = None,
+    kernel_size: int = 3,
+    use_batchnorm: bool = True,
+    pool_last_stage: bool = True,
+    dropout: float = 0.0,
+    input_dim: int | None = None,
+    stem_spatial_size: int = 32,
+):
+    """Builds a MyrtleCNN (optionally behind a `_TabularStem`), wired up with
+    the same forward-hook + `.fc` interface used by build_cnn_model /
+    build_simple_cnn_model.
+
+    Defaults (base_width=64, num_stages=4, blocks_per_stage=[1,1,1,1]) give
+    channels=[64,128,256,512] -- i.e. exactly the "Myrtle5 with 64 channels"
+    setup used for CIFAR-10 in Ruiz-Garcia et al. 2021. Pass an explicit
+    `channels` list to bypass the doubling schedule entirely if a different
+    width profile is wanted.
+    """
+    if channels is None:
+        if num_stages < 1:
+            raise ValueError(f"num_stages debe ser >= 1, recibido {num_stages}")
+        channels = [int(round(base_width * (2 ** i))) for i in range(num_stages)]
+
+    backbone = MyrtleCNN(
+        num_classes=num_classes,
+        in_channels=input_ch,
+        channels=channels,
+        blocks_per_stage=blocks_per_stage,
+        kernel_size=kernel_size,
+        use_batchnorm=use_batchnorm,
+        pool_last_stage=pool_last_stage,
+        dropout=dropout,
+    )
+
+    stem = None
+    if input_dim is not None:
+        stem = _TabularStem(input_dim=input_dim, out_channels=input_ch, spatial_size=stem_spatial_size)
+
+    model = _CNNWithStem(backbone, stem).to(device)
+
+    capture = _FeatureCapture()
+    classifier = model.fc
+    classifier.register_forward_hook(_make_hook(capture))
+    return model, classifier, capture
+
+
 def load_pretrained_cnn(
     checkpoint_path: str,
     pretrained_num_classes: int,
@@ -307,6 +444,10 @@ def load_pretrained_cnn(
     dropout: float = 0.0,
     fc_hidden_dim: int | None = None,
     freeze_backbone: bool = False,
+    base_width: int = 64,
+    myrtle_num_stages: int = 4,
+    myrtle_blocks_per_stage: list[int] | None = None,
+    pool_last_stage: bool = True,
 ):
     """Loads a checkpoint saved by run_training (model_weights.pt, i.e. a dict
     with a 'torch_model' state_dict key) into a freshly-built backbone that
@@ -323,6 +464,11 @@ def load_pretrained_cnn(
     carried over from the checkpoint as-is. Set `freeze_backbone=True` to
     keep those backbone weights fixed during the follow-up training run
     (linear-probe style); leave it False to fine-tune the whole network.
+
+    `base_width` / `myrtle_num_stages` / `myrtle_blocks_per_stage` /
+    `pool_last_stage` only apply when `backbone == "myrtle"`, and must match
+    the architecture the checkpoint was originally trained with (same rule
+    as `blocks_per_stage`/`width_mult` for `backbone == "resnet18"`).
     """
     if backbone == "resnet18":
         model, classifier, capture = build_cnn_model(
@@ -338,8 +484,19 @@ def load_pretrained_cnn(
             dropout=dropout, fc_hidden_dim=fc_hidden_dim,
             input_dim=input_dim, stem_spatial_size=stem_spatial_size,
         )
+    elif backbone == "myrtle":
+        model, classifier, capture = build_myrtle_cnn_model(
+            num_classes=pretrained_num_classes, input_ch=input_ch, device=device,
+            base_width=base_width, num_stages=myrtle_num_stages,
+            blocks_per_stage=myrtle_blocks_per_stage, channels=channels,
+            kernel_size=kernel_size, use_batchnorm=use_batchnorm,
+            pool_last_stage=pool_last_stage, dropout=dropout,
+            input_dim=input_dim, stem_spatial_size=stem_spatial_size,
+        )
     else:
-        raise ValueError(f"Unknown backbone '{backbone}'. Expected 'resnet18' or 'simple_cnn'.")
+        raise ValueError(
+            f"Unknown backbone '{backbone}'. Expected 'resnet18', 'simple_cnn', or 'myrtle'."
+        )
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
     state_dict = checkpoint["torch_model"] if "torch_model" in checkpoint else checkpoint

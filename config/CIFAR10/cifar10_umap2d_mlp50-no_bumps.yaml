@@ -1,0 +1,87 @@
+use_gpu: false
+
+# ---------------------------------------------------------------------------
+# Approach 2, variant B: UMAP instead of PCA.
+#
+# PCA/random-projection are LINEAR, so on raw CIFAR-10 pixels the 2-3D
+# embedding just ends up with class clouds overlapping each other -- not
+# separable at all, let alone entangled-but-separable like spiral/rings.
+# UMAP is nonlinear and preserves local neighborhood structure, so it tends
+# to pull same-class points into distinct (often curled / non-convex)
+# regions instead -- much closer to what spiral/rings actually look like.
+#
+# reduce_source: pretrained_cnn runs UMAP on the pooled features of a small
+# conv net given a SHORT supervised pretraining pass (reduce_pretrain_epochs,
+# default 2 -- deliberately not trained to convergence: a fully-trained/
+# collapsed backbone would hand you linearly-separable classes already,
+# defeating the point) rather than on raw pixels directly.
+#
+# UMAP has a real out-of-sample .transform(), so train is fit and test is
+# transformed cleanly -- no need to subsample test for correctness (only
+# reduce_max_train_samples is set below, purely to keep the training pass +
+# UMAP fit fast).
+# ---------------------------------------------------------------------------
+
+data:
+  dataset_name: cifar10
+  data_dir: ./data
+  num_classes: 10
+  reduce_dim: 2
+  reduce_method: umap
+  reduce_source: pretrained_cnn     # default for umap/tsne; explicit here for clarity
+  reduce_pretrain_epochs: 2         # short supervised pretrain, then frozen
+  reduce_seed: 0
+  reduce_standardize: true
+  #reduce_max_train_samples: 20000   # keep the UMAP fit fast; raise/remove for a full run
+
+model:
+  architecture: mlp
+  init_type: glorot
+  nn_width: 50                 # the narrow shared bottleneck, matching MLP-50
+  num_hidden_layers: 1          # single layer, matching the spiral/rings setup
+  use_bias: true
+
+training:
+  training_steps: 20000
+  save_metrics_every_n_steps: 50
+  batch_size: 200
+  random_seed: 42
+  loss: cross_entropy
+
+optimizer:
+  beta1: 0.9
+  beta2: 0.999
+  eps: 1.0e-08
+  gradient_clipping: null
+  l2_reg: 0.0
+  learning_rate: 0.001
+  momentum: 0.9
+  optimizer_type: adam
+
+dynamics:
+  bumps_before_tpt: false   # set true to test the oscillation effect against this baseline
+  bumps_at_tpt: false
+  period_length: 500
+  w_max: 70.0
+  amplitude: 1.0
+  bump_order:
+  tpt_accuracy_threshold: 1.0
+
+analysis:
+  metric_subset_size: 5000
+  plot_version: simplified
+  compute_results: average
+  outputs:
+    classifier_metrics: false
+    nc_metrics: false
+    separability_metrics: false
+    pca_analysis: false
+    pca_geometric: false
+    hyperplane_metrics: false
+    proj_nc_analysis: false
+    multiclass_metrics: true
+  pca:
+    projected_dims: [1, 2]     # only 2 dims exist in this embedding
+
+output:
+  output_dir: /data/samuel_lozano/dynamical-sgd

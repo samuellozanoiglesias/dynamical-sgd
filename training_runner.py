@@ -19,6 +19,7 @@ import torch
 from model_cnn import (
     build_cnn_model,
     build_simple_cnn_model,
+    build_myrtle_cnn_model,
     load_pretrained_cnn,
     make_optimizer_and_scheduler,
     make_criterion,
@@ -1021,9 +1022,53 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
                     dropout=dropout, fc_hidden_dim=fc_hidden_dim,
                     input_dim=input_dim, stem_spatial_size=stem_spatial_size,
                 )
+        elif backbone_name == "myrtle":
+            # Configurable Myrtle-family CNN (Shankar et al., 2020), the
+            # network used for the CIFAR-10 experiments in Ruiz-Garcia et al.
+            # 2021 ("Tilting the playing field"). Only the architecture is
+            # ported over here -- no dynamical loss / Gamma-weighting; the
+            # existing bump-sampling oscillation mechanism below is used
+            # instead, unchanged, since it is architecture-agnostic.
+            myrtle_cfg = cnn_cfg.get("myrtle", {}) or {}
+            base_width = int(myrtle_cfg.get("base_width", 64))
+            myrtle_num_stages = int(myrtle_cfg.get("num_stages", 4))
+            blocks_per_stage_raw = myrtle_cfg.get("blocks_per_stage")
+            myrtle_blocks_per_stage = (
+                [int(b) for b in blocks_per_stage_raw] if blocks_per_stage_raw else None
+            )
+            channels_raw = myrtle_cfg.get("channels")
+            myrtle_channels = [int(c) for c in channels_raw] if channels_raw else None
+            kernel_size = int(myrtle_cfg.get("kernel_size", 3))
+            use_batchnorm = _as_bool(myrtle_cfg.get("use_batchnorm", True))
+            pool_last_stage = _as_bool(myrtle_cfg.get("pool_last_stage", True))
+            dropout = float(myrtle_cfg.get("dropout", 0.0))
+            stem_spatial_size = int(cnn_cfg.get("stem_spatial_size", 32))
+
+            if pretrained_checkpoint:
+                torch_model, classifier, feature_capture = load_pretrained_cnn(
+                    checkpoint_path=str(pretrained_checkpoint),
+                    pretrained_num_classes=int(cnn_cfg.get("pretrained_num_classes", 10)),
+                    new_num_classes=num_classes, input_ch=input_ch, device=torch_device,
+                    backbone="myrtle", input_dim=input_dim,
+                    stem_spatial_size=stem_spatial_size,
+                    base_width=base_width, myrtle_num_stages=myrtle_num_stages,
+                    myrtle_blocks_per_stage=myrtle_blocks_per_stage, channels=myrtle_channels,
+                    kernel_size=kernel_size, use_batchnorm=use_batchnorm,
+                    pool_last_stage=pool_last_stage, dropout=dropout,
+                    freeze_backbone=_as_bool(cnn_cfg.get("freeze_backbone", False)),
+                )
+            else:
+                torch_model, classifier, feature_capture = build_myrtle_cnn_model(
+                    num_classes=num_classes, input_ch=input_ch, device=torch_device,
+                    base_width=base_width, num_stages=myrtle_num_stages,
+                    blocks_per_stage=myrtle_blocks_per_stage, channels=myrtle_channels,
+                    kernel_size=kernel_size, use_batchnorm=use_batchnorm,
+                    pool_last_stage=pool_last_stage, dropout=dropout,
+                    input_dim=input_dim, stem_spatial_size=stem_spatial_size,
+                )
         else:
             raise ValueError(
-                f"Unknown model.cnn.backbone '{backbone_name}'. Expected 'resnet18' or 'simple_cnn'."
+                f"Unknown model.cnn.backbone '{backbone_name}'. Expected 'resnet18', 'simple_cnn', or 'myrtle'."
             )
         initial_classifier_weight = (classifier.weight.detach().cpu().clone().numpy())
         last_classifier_weight = initial_classifier_weight.copy()

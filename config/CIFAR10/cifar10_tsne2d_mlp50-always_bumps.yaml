@@ -1,0 +1,87 @@
+use_gpu: false
+
+# ---------------------------------------------------------------------------
+# Approach 2, variant C: t-SNE instead of PCA (or UMAP).
+#
+# Same motivation as the UMAP variant -- nonlinear, structure-preserving
+# reduction instead of PCA's linear/variance-preserving one, so class clouds
+# come out separable-but-entangled rather than overlapping.
+#
+# Key difference from UMAP: scikit-learn's TSNE has NO real out-of-sample
+# transform. It's fit TRANSDUCTIVELY on train+test concatenated together and
+# then split back apart (see _tsne_fit_transform in generate_dataset.py) --
+# perfectly fine for building a fixed dataset like this, just not meant for
+# genuine held-out generalization the way UMAP's fit/transform split is.
+#
+# It's also more expensive: O(n log n) (barnes_hut, the default here since
+# reduce_dim <= 3) or O(n^2) (exact, only needed for reduce_dim > 3) over the
+# COMBINED train+test point count. Both reduce_max_train_samples and
+# reduce_max_test_samples are set below to keep this tractable -- raise or
+# remove them for a full run, but expect it to be noticeably slower than the
+# UMAP variant at full CIFAR-10 scale.
+# ---------------------------------------------------------------------------
+
+data:
+  dataset_name: cifar10
+  data_dir: ./data
+  num_classes: 10
+  reduce_dim: 2
+  reduce_method: tsne
+  reduce_source: pretrained_cnn     # default for umap/tsne; explicit here for clarity
+  reduce_pretrain_epochs: 2         # short supervised pretrain, then frozen
+  reduce_seed: 0
+  reduce_standardize: true
+  reduce_max_train_samples: 8000    # t-SNE is transductive + O(n log n)-O(n^2); keep it small
+  reduce_max_test_samples: 2000
+
+model:
+  architecture: mlp
+  init_type: glorot
+  nn_width: 50                 # the narrow shared bottleneck, matching MLP-50
+  num_hidden_layers: 1          # single layer, matching the spiral/rings setup
+  use_bias: true
+
+training:
+  training_steps: 20000
+  save_metrics_every_n_steps: 50
+  batch_size: 200
+  random_seed: 42
+  loss: cross_entropy
+
+optimizer:
+  beta1: 0.9
+  beta2: 0.999
+  eps: 1.0e-08
+  gradient_clipping: null
+  l2_reg: 0.0
+  learning_rate: 0.001
+  momentum: 0.9
+  optimizer_type: adam
+
+dynamics:
+  bumps_before_tpt: true   # set true to test the oscillation effect against this baseline
+  bumps_at_tpt: true
+  period_length: 200
+  w_max: 20.0
+  amplitude: 1.0
+  bump_order:
+  tpt_accuracy_threshold: 1.0
+
+analysis:
+  metric_subset_size: 2000    # <= reduce_max_test_samples above
+  plot_version: simplified
+  compute_results: average
+  outputs:
+    classifier_metrics: false
+    nc_metrics: false
+    separability_metrics: false
+    pca_analysis: false
+    pca_geometric: false
+    hyperplane_metrics: false
+    proj_nc_analysis: false
+    multiclass_metrics: true
+  pca:
+    projected_dims: [1, 2]     # only 2 dims exist in this embedding
+
+output:
+  output_dir: /data/samuel_lozano/dynamical-sgd

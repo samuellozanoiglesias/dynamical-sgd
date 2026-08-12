@@ -865,6 +865,371 @@ def _normalize_image_batch(images_u8: np.ndarray, mean: tuple, std: tuple) -> np
     return (x - mean_arr) / std_arr
 
 
+# ---------------------------------------------------------------------------
+# Optional low-dimensional embedding for image datasets (currently wired up
+# for CIFAR-10 only, via data.reduce_dim / data.reduce_method / data.reduce_source).
+#
+# Motivation: the "stuck without oscillation" failure mode originally seen on
+# the 2D spiral/rings + width-50 single-hidden-layer MLP setup has three
+# ingredients that raw-pixel CIFAR-10 training doesn't reproduce even with a
+# narrow bottleneck: (1) a genuinely narrow *shared* bottleneck every class's
+# gradient must fight over, (2) a topologically entangled decision boundary
+# that's a property of a *low-dimensional* input geometry (curled-together,
+# NOT linearly separable classes), and (3) no landscape-smoothing mechanism
+# (BatchNorm, skip connections). Raw CIFAR-10 pixels live in ~3072-D, which
+# gives even a narrow model enough near-orthogonal directions at init that
+# classes rarely have to destructively interfere the way they do when
+# squeezed through a literal 2D bottleneck.
+#
+# Two independent knobs control the embedding:
+#
+#   data.reduce_source -- which feature space the reduction algorithm sees:
+#     "pixels"        -- raw normalized pixels, flattened (default for
+#                         pca/random_projection).
+#     "frozen_cnn"     -- pooled features of a small, NEVER-TRAINED,
+#                         randomly-initialized conv net (fixed by
+#                         data.reduce_seed).
+#     "pretrained_cnn" -- pooled features of a small conv net given a SHORT
+#                         supervised pretraining run (data.reduce_pretrain_epochs,
+#                         default 2) and then frozen (default for umap/tsne).
+#                         Enough training for the features to be
+#                         discriminative; deliberately not trained to
+#                         convergence, since a fully-trained/collapsed
+#                         backbone would hand the classes to you already
+#                         linearly separable -- defeating the point.
+#
+#   data.reduce_method -- the actual dimensionality-reduction algorithm:
+#     "pca"              -- linear, preserves global variance. Fast, but on
+#                            CIFAR-10 pixels this tends to produce OVERLAPPING
+#                            class clouds in 2-3D (classes aren't separable
+#                            at all, let alone entangled-but-separable like
+#                            spiral/rings) because PCA optimizes for variance,
+#                            not class structure.
+#     "random_projection" -- linear, same overlap caveat as PCA, useful
+#                            mainly as a cheap baseline / sanity check.
+#     "umap"              -- nonlinear, preserves local neighborhood/manifold
+#                            structure, so same-class points tend to form
+#                            distinct (often curled / non-convex) regions
+#                            rather than overlapping blobs -- closer to the
+#                            "separable but not linearly separable" character
+#                            of spiral/rings. Has a real out-of-sample
+#                            .transform(), so train/test stay a clean fit/
+#                            transform split.
+#     "tsne"              -- nonlinear, similar visual character to UMAP.
+#                            scikit-learn's TSNE has NO out-of-sample
+#                            transform, so this is fit transductively on
+#                            train+test concatenated together, then split
+#                            back apart -- fine for building a fixed dataset
+#                            like this, not meant for genuine held-out
+#                            generalization. O(n log n) (barnes_hut, only
+#                            for reduce_dim<=3) or O(n^2) (exact, needed for
+#                            reduce_dim>3) in the number of points, so use
+#                            data.reduce_max_train_samples /
+#                            data.reduce_max_test_samples to subsample before
+#                            fitting on full CIFAR-10 (60k points).
+#
+# The resulting DatasetBundle is tabular (input_shape == (reduce_dim,)), so
+# it plugs directly into the existing `architecture: mlp` path in model.py
+# with no further changes -- e.g. nn_width: 50, num_hidden_layers: 1
+# recreates the exact "MLP-50" bottleneck from the synthetic-data
+# experiments.
+# ---------------------------------------------------------------------------
+
+_VALID_REDUCE_METHODS = {"pca", "random_projection", "umap", "tsne"}
+_VALID_REDUCE_SOURCES = {"pixels", "frozen_cnn", "pretrained_cnn"}
+
+
+def _pca_fit_transform(
+    train_flat: np.ndarray, test_flat: np.ndarray, reduce_dim: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Fits PCA on `train_flat` (N, D) via economy SVD and projects both
+    splits onto the top `reduce_dim` principal components. No sklearn
+    dependency -- this is the entire algorithm."""
+    mean = train_flat.mean(axis=0, keepdims=True)
+    centered = train_flat - mean
+    # full_matrices=False -> economy SVD, cheap enough for CIFAR-10 (50k x D).
+    _, _, vt = np.linalg.svd(centered, full_matrices=False)
+    components = vt[:reduce_dim]  # (reduce_dim, D)
+    train_embed = centered @ components.T
+    test_embed = (test_flat - mean) @ components.T
+    return train_embed, test_embed
+
+
+def _random_projection_fit_transform(
+    train_flat: np.ndarray, test_flat: np.ndarray, reduce_dim: int, seed: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Fixed Gaussian random projection (Johnson-Lindenstrauss style),
+    mean-centered on train stats. Deterministic given `seed`."""
+    rng = np.random.default_rng(seed)
+    dim_in = train_flat.shape[1]
+    proj = rng.normal(size=(dim_in, reduce_dim)) / np.sqrt(float(reduce_dim))
+    mean = train_flat.mean(axis=0, keepdims=True)
+    train_embed = (train_flat - mean) @ proj
+    test_embed = (test_flat - mean) @ proj
+    return train_embed, test_embed
+
+
+def _frozen_cnn_features(
+    x_train_img: np.ndarray, x_test_img: np.ndarray, seed: int, batch_size: int = 1024
+) -> tuple[np.ndarray, np.ndarray]:
+    """Runs both splits through a small, randomly-initialized, NEVER-TRAINED
+    conv net (fixed by `seed`) and returns the flattened pooled features.
+    This is the "frozen small conv backbone" embedding option -- meant to be
+    followed by `_pca_fit_transform` (or a random projection) down to
+    `reduce_dim`, giving a feature space that's already funneled through a
+    few conv layers rather than raw pixels. Imports torch lazily so the
+    plain 'pca' / 'random_projection' paths never require it."""
+    import torch
+    import torch.nn as nn
+
+    torch.manual_seed(int(seed))
+    in_ch = int(x_train_img.shape[1])
+    backbone = nn.Sequential(
+        nn.Conv2d(in_ch, 16, kernel_size=3, padding=1),
+        nn.ReLU(inplace=True),
+        nn.MaxPool2d(2),
+        nn.Conv2d(16, 32, kernel_size=3, padding=1),
+        nn.ReLU(inplace=True),
+        nn.AdaptiveAvgPool2d(4),
+    ).eval()
+
+    def _run(x_img: np.ndarray) -> np.ndarray:
+        feats: list[np.ndarray] = []
+        with torch.no_grad():
+            for start in range(0, x_img.shape[0], batch_size):
+                batch = torch.as_tensor(
+                    x_img[start:start + batch_size], dtype=torch.float32
+                )
+                out = backbone(batch).flatten(1)
+                feats.append(out.numpy())
+        return np.concatenate(feats, axis=0)
+
+    return _run(x_train_img), _run(x_test_img)
+
+
+def _pretrained_cnn_features(
+    x_train_img: np.ndarray,
+    y_train_img: np.ndarray,
+    x_test_img: np.ndarray,
+    num_classes: int,
+    seed: int,
+    epochs: int = 2,
+    lr: float = 1.0e-3,
+    batch_size: int = 256,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Same small conv backbone as `_frozen_cnn_features`, but given a SHORT
+    supervised pretraining run (default 2 epochs, real labels, Adam) before
+    being frozen and used purely as a feature extractor. Deliberately not
+    trained to convergence -- a couple epochs is enough for the pooled
+    features to become discriminative (so UMAP/t-SNE have real class
+    structure to preserve) without letting the network fully separate the
+    classes on its own the way a converged/collapsed backbone would.
+    Lazy torch import, like `_frozen_cnn_features`."""
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+
+    torch.manual_seed(int(seed))
+    in_ch = int(x_train_img.shape[1])
+
+    backbone = nn.Sequential(
+        nn.Conv2d(in_ch, 16, kernel_size=3, padding=1),
+        nn.ReLU(inplace=True),
+        nn.MaxPool2d(2),
+        nn.Conv2d(16, 32, kernel_size=3, padding=1),
+        nn.ReLU(inplace=True),
+        nn.AdaptiveAvgPool2d(4),
+    )
+    classifier_head = nn.Linear(32 * 4 * 4, num_classes)
+    optimizer = torch.optim.Adam(
+        list(backbone.parameters()) + list(classifier_head.parameters()), lr=lr
+    )
+
+    x_train_t = torch.as_tensor(x_train_img, dtype=torch.float32)
+    y_train_t = torch.as_tensor(y_train_img, dtype=torch.long)
+    n_train = x_train_t.shape[0]
+    rng = np.random.default_rng(seed)
+
+    backbone.train()
+    classifier_head.train()
+    for _ in range(max(1, int(epochs))):
+        order = rng.permutation(n_train)
+        for start in range(0, n_train, batch_size):
+            idx = order[start:start + batch_size]
+            batch_x = x_train_t[idx]
+            batch_y = y_train_t[idx]
+            optimizer.zero_grad()
+            feats = backbone(batch_x).flatten(1)
+            logits = classifier_head(feats)
+            loss = F.cross_entropy(logits, batch_y)
+            loss.backward()
+            optimizer.step()
+
+    backbone.eval()
+
+    def _run(x_img: np.ndarray) -> np.ndarray:
+        out_parts: list[np.ndarray] = []
+        with torch.no_grad():
+            for start in range(0, x_img.shape[0], batch_size):
+                batch = torch.as_tensor(x_img[start:start + batch_size], dtype=torch.float32)
+                out_parts.append(backbone(batch).flatten(1).numpy())
+        return np.concatenate(out_parts, axis=0)
+
+    return _run(x_train_img), _run(x_test_img)
+
+
+def _umap_fit_transform(
+    train_feats: np.ndarray, test_feats: np.ndarray, reduce_dim: int, seed: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Nonlinear, neighborhood-structure-preserving reduction. Real
+    out-of-sample .transform(), so train/test stay a clean fit/transform
+    split (unlike t-SNE below). Lazy import -- requires umap-learn."""
+    import umap
+
+    reducer = umap.UMAP(n_components=reduce_dim, random_state=seed)
+    train_embed = reducer.fit_transform(train_feats)
+    test_embed = reducer.transform(test_feats)
+    return np.asarray(train_embed), np.asarray(test_embed)
+
+
+def _tsne_fit_transform(
+    train_feats: np.ndarray, test_feats: np.ndarray, reduce_dim: int, seed: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Nonlinear reduction, fit TRANSDUCTIVELY on train+test concatenated
+    together (sklearn's TSNE has no real out-of-sample transform), then
+    split back apart by original split sizes. `method='barnes_hut'`
+    (sklearn's default, O(n log n)) only supports reduce_dim <= 3; falls
+    back to the O(n^2) `method='exact'` above that. Both are expensive at
+    full CIFAR-10 scale (60k points combined) -- use
+    data.reduce_max_train_samples / data.reduce_max_test_samples to
+    subsample first. Lazy import -- requires scikit-learn."""
+    from sklearn.manifold import TSNE
+
+    n_train = train_feats.shape[0]
+    combined = np.concatenate([train_feats, test_feats], axis=0)
+    tsne_method = "barnes_hut" if reduce_dim <= 3 else "exact"
+    # perplexity must be < n_samples; scale gently with dataset size but cap
+    # it at the usual sane default of 30.
+    perplexity = float(min(30.0, max(5.0, combined.shape[0] / 100.0)))
+
+    tsne = TSNE(
+        n_components=reduce_dim,
+        random_state=seed,
+        init="pca",
+        method=tsne_method,
+        perplexity=perplexity,
+    )
+    combined_embed = tsne.fit_transform(combined)
+    return combined_embed[:n_train], combined_embed[n_train:]
+
+
+def _stratified_subsample(
+    x_img: np.ndarray, y: np.ndarray, max_samples: int | None, seed: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Subsamples (x_img, y) down to roughly `max_samples` points, spread as
+    evenly as possible across classes. No-op if max_samples is None or
+    already >= the current sample count. Used to keep UMAP/t-SNE (and, if
+    ever needed, the other methods) tractable on full CIFAR-10."""
+    if max_samples is None or x_img.shape[0] <= max_samples:
+        return x_img, y
+    rng = np.random.default_rng(seed)
+    classes = np.unique(y)
+    per_class = max(1, int(max_samples) // len(classes))
+    idx_parts: list[np.ndarray] = []
+    for class_id in classes:
+        class_idx = np.where(y == class_id)[0]
+        chosen = rng.choice(class_idx, size=min(per_class, class_idx.size), replace=False)
+        idx_parts.append(chosen)
+    idx = np.concatenate(idx_parts)
+    rng.shuffle(idx)
+    return x_img[idx], y[idx]
+
+
+def _fit_transform_dim_reduction(
+    x_train_img: np.ndarray,
+    x_test_img: np.ndarray,
+    method: str,
+    reduce_dim: int,
+    seed: int,
+    standardize: bool,
+    source: str = "pixels",
+    y_train_img: np.ndarray | None = None,
+    num_classes: int | None = None,
+    pretrain_epochs: int = 2,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Top-level entry point for the reduction. x_*_img are the already
+    normalized (N, C, H, W) float32 image arrays; returns (N, reduce_dim)
+    float32 embeddings for train/test.
+
+    `source` selects the feature space the `method` operates on (see the big
+    comment above this section); `pretrain_epochs` only applies when
+    source == 'pretrained_cnn'."""
+    if method not in _VALID_REDUCE_METHODS:
+        raise ValueError(
+            f"data.reduce_method '{method}' not recognized. "
+            f"Expected one of {sorted(_VALID_REDUCE_METHODS)}."
+        )
+    if source not in _VALID_REDUCE_SOURCES:
+        raise ValueError(
+            f"data.reduce_source '{source}' not recognized. "
+            f"Expected one of {sorted(_VALID_REDUCE_SOURCES)}."
+        )
+    if reduce_dim <= 0:
+        raise ValueError(f"data.reduce_dim must be > 0, got {reduce_dim}.")
+
+    if source == "pixels":
+        n_train = x_train_img.shape[0]
+        n_test = x_test_img.shape[0]
+        train_feat = x_train_img.reshape(n_train, -1).astype(np.float64)
+        test_feat = x_test_img.reshape(n_test, -1).astype(np.float64)
+    elif source == "frozen_cnn":
+        feats_train, feats_test = _frozen_cnn_features(x_train_img, x_test_img, seed=seed)
+        train_feat = feats_train.astype(np.float64)
+        test_feat = feats_test.astype(np.float64)
+    else:  # pretrained_cnn
+        if y_train_img is None or num_classes is None:
+            raise ValueError(
+                "data.reduce_source == 'pretrained_cnn' requires train labels "
+                "and num_classes to run the short supervised pretraining pass."
+            )
+        feats_train, feats_test = _pretrained_cnn_features(
+            x_train_img, y_train_img, x_test_img,
+            num_classes=num_classes, seed=seed, epochs=pretrain_epochs,
+        )
+        train_feat = feats_train.astype(np.float64)
+        test_feat = feats_test.astype(np.float64)
+
+    if train_feat.shape[1] < reduce_dim:
+        raise ValueError(
+            f"data.reduce_dim ({reduce_dim}) cannot exceed the "
+            f"'{source}' feature dimensionality ({train_feat.shape[1]})."
+        )
+
+    if method == "pca":
+        train_embed, test_embed = _pca_fit_transform(train_feat, test_feat, reduce_dim)
+    elif method == "random_projection":
+        train_embed, test_embed = _random_projection_fit_transform(
+            train_feat, test_feat, reduce_dim, seed=seed
+        )
+    elif method == "umap":
+        train_embed, test_embed = _umap_fit_transform(train_feat, test_feat, reduce_dim, seed)
+    else:  # tsne
+        train_embed, test_embed = _tsne_fit_transform(train_feat, test_feat, reduce_dim, seed)
+
+    if standardize:
+        # Rescale so the narrow MLP sees the same kind of unit-ish-variance
+        # input the synthetic 2D generators (spiral/rings/blobs) already
+        # produce -- otherwise a method/source combo that happens to produce
+        # a larger-scale embedding could dominate purely by scale.
+        std = train_embed.std(axis=0, keepdims=True)
+        std = np.where(std < 1e-8, 1.0, std)
+        mean_e = train_embed.mean(axis=0, keepdims=True)
+        train_embed = (train_embed - mean_e) / std
+        test_embed = (test_embed - mean_e) / std
+
+    return train_embed.astype(np.float32), test_embed.astype(np.float32)
+
+
 def save_image_grid_visualizations(
     x_train: np.ndarray,
     y_train: np.ndarray,
@@ -948,13 +1313,60 @@ def _load_cifar10_bundle(data_cfg: dict, output_dir: Path) -> DatasetBundle:
         title_prefix="CIFAR-10", output_prefix="cifar10", class_names=class_names,
     )
 
+    # Optional: collapse CIFAR-10 down to a low-dimensional (typically 2-3D)
+    # embedding, turning it into a tabular dataset -- see the big comment
+    # above _fit_transform_dim_reduction for why. Off by default (native
+    # (3, 32, 32) image bundle, unchanged behavior) unless data.reduce_dim is set.
+    reduce_dim_raw = data_cfg.get("reduce_dim")
+    if reduce_dim_raw:
+        reduce_dim = int(reduce_dim_raw)
+        reduce_method = str(data_cfg.get("reduce_method", "pca")).strip().lower()
+        # umap/tsne default to features from a lightly-pretrained backbone
+        # (real class structure to preserve); pca/random_projection default
+        # to raw pixels (their original, cheaper behavior).
+        default_source = "pretrained_cnn" if reduce_method in {"umap", "tsne"} else "pixels"
+        reduce_source = str(data_cfg.get("reduce_source", default_source)).strip().lower()
+        reduce_seed = int(data_cfg.get("reduce_seed", 0))
+        reduce_standardize = _as_bool_local(data_cfg.get("reduce_standardize", True))
+        reduce_pretrain_epochs = int(data_cfg.get("reduce_pretrain_epochs", 2))
+
+        # umap/tsne (especially tsne, which is transductive over train+test
+        # combined) get expensive at full CIFAR-10 scale -- optionally
+        # subsample first. No-ops (and defaults to None, i.e. full dataset)
+        # unless explicitly set.
+        max_train_raw = data_cfg.get("reduce_max_train_samples")
+        max_test_raw = data_cfg.get("reduce_max_test_samples")
+        max_train_samples = int(max_train_raw) if max_train_raw else None
+        max_test_samples = int(max_test_raw) if max_test_raw else None
+        x_train, y_train = _stratified_subsample(x_train, y_train, max_train_samples, reduce_seed)
+        x_test, y_test = _stratified_subsample(x_test, y_test, max_test_samples, reduce_seed + 1)
+
+        x_train, x_test = _fit_transform_dim_reduction(
+            x_train, x_test,
+            method=reduce_method, reduce_dim=reduce_dim,
+            seed=reduce_seed, standardize=reduce_standardize,
+            source=reduce_source, y_train_img=y_train, num_classes=num_classes,
+            pretrain_epochs=reduce_pretrain_epochs,
+        )
+
+        if reduce_dim >= 2:
+            _save_2d_dataset_visualizations(
+                x_train, y_train, x_test, y_test, num_classes, output_dir,
+                title_prefix=f"CIFAR-10 -> {reduce_method} dim={reduce_dim}",
+                output_name=f"cifar10_reduced_{reduce_method}_dim{reduce_dim}_samples.png",
+            )
+
+        input_shape: tuple[int, ...] = (reduce_dim,)
+    else:
+        input_shape = tuple(x_train.shape[1:])
+
     class_to_indices = build_class_index_map(y_train, num_classes)
     return DatasetBundle(
         train_inputs=x_train, train_targets=y_train,
         test_inputs=x_test, test_targets=y_test,
         class_to_indices=class_to_indices,
         num_classes=num_classes,
-        input_shape=tuple(x_train.shape[1:]),
+        input_shape=input_shape,
     )
 
 
@@ -1504,6 +1916,7 @@ def remap_to_metaclasses(
     mapping: list[list[int]],
     output_dir: Path,
     dataset_label: str,
+    data_cfg: dict | None = None,
 ) -> "DatasetBundle":
     """Relabels `bundle` (any DatasetBundle, image or tabular) by grouping its
     original integer labels according to `mapping`. Original images/features,
@@ -1527,6 +1940,25 @@ def remap_to_metaclasses(
             output_prefix=f"{dataset_label.lower()}_metaclasses",
             class_names=meta_names,
         )
+    elif len(bundle.input_shape) == 1 and data_cfg is not None:
+        # Tabular bundle -- this is the post-dim-reduction case (PCA/UMAP/
+        # t-SNE on CIFAR-10 etc, see _load_cifar10_bundle). The reduced-dim
+        # scatter plot was already saved by the loader using the ORIGINAL
+        # (pre-metaclass) labels, since reduction happens before this
+        # remapping step runs. Regenerate it here with the metaclass labels,
+        # overwriting the same file, so the plot the user looks at matches
+        # what the model is actually trained on.
+        reduce_dim_raw = data_cfg.get("reduce_dim")
+        if reduce_dim_raw:
+            reduce_dim = int(reduce_dim_raw)
+            reduce_method = str(data_cfg.get("reduce_method", "pca")).strip().lower()
+            if reduce_dim >= 2:
+                _save_2d_dataset_visualizations(
+                    bundle.train_inputs, y_train_meta, bundle.test_inputs, y_test_meta,
+                    num_metaclasses, output_dir,
+                    title_prefix=f"{dataset_label} -> {reduce_method} dim={reduce_dim} (metaclasses)",
+                    output_name=f"{dataset_label.lower()}_reduced_{reduce_method}_dim{reduce_dim}_samples.png",
+                )
 
     return DatasetBundle(
         train_inputs=bundle.train_inputs,
@@ -1558,7 +1990,7 @@ def _maybe_apply_metaclass_mapping(
     else:
         mapping = _resolve_metaclass_mapping(raw_mapping, bundle.num_classes)
 
-    return remap_to_metaclasses(bundle, mapping, output_dir, dataset_label)
+    return remap_to_metaclasses(bundle, mapping, output_dir, dataset_label, data_cfg=data_cfg)
 
 
 def build_dataset_bundle(config: dict, output_dir: Path) -> DatasetBundle:

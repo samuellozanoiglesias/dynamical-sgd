@@ -1,0 +1,72 @@
+# Underparameterized Myrtle5 variant (base_width=8 instead of 64) on
+# CIFAR-10, static cross-entropy. The paper's central underparameterized-
+# regime result is that a network too narrow to fit the training data with
+# the standard static loss CAN fit it once oscillations are turned on
+# (Sec 3.1 / Fig. 3, narrow network case).
+#
+
+use_gpu: true
+
+data:
+  dataset_name: cifar10
+  data_dir: ./data
+  num_classes: 10
+
+model:
+  architecture: cnn
+  cnn:
+    backbone: myrtle
+    myrtle:
+      base_width: 8         # channels: 8 -> 16 -> 32 -> 64 (narrow / underparameterized)
+      num_stages: 3
+      blocks_per_stage: [1, 1, 1]
+      pool_last_stage: true
+      use_batchnorm: true
+      kernel_size: 3
+      dropout: 0.0
+
+training:
+  training_steps: 10000
+  save_metrics_every_n_steps: 1
+  batch_size: 128
+  random_seed: 42
+  loss: cross_entropy
+
+optimizer:
+  optimizer_type: sgd
+  learning_rate: 0.0679
+  momentum: 0.9
+  weight_decay: 0.0005
+  gradient_clipping: null
+  nesterov: false
+
+dynamics:
+  bumps_before_tpt: true
+  bumps_at_tpt: true
+  bumps_after_freeze: true
+  period_length: 100
+  w_max: 50.0
+  bump_order: null
+
+analysis:
+  metric_subset_size: 5000
+  plot_version: simplified
+  compute_results: average
+  outputs:
+    classifier_metrics: false
+    nc_metrics: false
+    separability_metrics: false
+    pca_analysis: false
+    pca_geometric: false
+    hyperplane_metrics: false
+    proj_nc_analysis: false
+    multiclass_metrics: true
+  pca:
+    projected_dims:
+    - 1
+    - 2
+    - 3
+    - 5
+
+output:
+  output_dir: /data/samuel_lozano/dynamical-sgd

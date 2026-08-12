@@ -1,0 +1,86 @@
+use_gpu: false
+
+# ---------------------------------------------------------------------------
+# Approach 2: don't hope pixel space produces the low-dim entanglement --
+# build it explicitly. CIFAR-10 images are collapsed to a `reduce_dim`-D
+# embedding (PCA on raw pixels here; see data.reduce_method for the
+# 'random_projection' / 'frozen_cnn' alternatives) and THEN fed into the
+# exact width-50, single-hidden-layer MLP used for the synthetic spiral/rings
+# experiments (model.architecture: mlp already handles any input_shape
+# generically, so no model-code changes were needed -- only the loader in
+# generate_dataset.py gained the reduce_dim/reduce_method/reduce_seed/
+# reduce_standardize options under `data`).
+#
+# This is the most faithful real-data analog of the spiral/rings setup: the
+# class geometry is genuinely low-dimensional and entangled (same regime the
+# MLP-50 case gets stuck in), it's just sourced from real CIFAR-10 images
+# instead of a synthetic generator.
+#
+# To test the oscillation effect itself, flip dynamics.bumps_before_tpt to
+# true (keep everything else fixed) and compare against this no-bumps
+# baseline.
+# ---------------------------------------------------------------------------
+
+data:
+  dataset_name: cifar10
+  data_dir: ./data
+  num_classes: 10
+  reduce_dim: 3                # try 3 for a slightly less crushed embedding
+  reduce_method: pca           # 'pca' | 'random_projection' | 'frozen_cnn'
+  reduce_seed: 0
+  reduce_standardize: true     # rescale embedding to ~unit variance per dim
+
+model:
+  architecture: mlp
+  init_type: glorot
+  nn_width: 50                 # the narrow shared bottleneck, matching MLP-50
+  num_hidden_layers: 1          # single layer, matching the spiral/rings setup
+  use_bias: true
+
+training:
+  training_steps: 20000
+  save_metrics_every_n_steps: 50
+  batch_size: 200
+  random_seed: 42
+  loss: cross_entropy
+
+optimizer:
+  beta1: 0.9
+  beta2: 0.999
+  eps: 1.0e-08
+  gradient_clipping: null
+  l2_reg: 0.0
+  learning_rate: 0.001
+  momentum: 0.9
+  optimizer_type: adam
+
+dynamics:
+  bumps_before_tpt: true   # set true to test the oscillation effect against this baseline
+  bumps_at_tpt: true
+  period_length: 200
+  w_max: 20.0
+  amplitude: 1.0
+  bump_order:
+  tpt_accuracy_threshold: 1.0
+
+analysis:
+  metric_subset_size: 5000
+  plot_version: simplified
+  compute_results: average
+  outputs:
+    classifier_metrics: false
+    nc_metrics: false
+    separability_metrics: false
+    pca_analysis: false
+    pca_geometric: false
+    hyperplane_metrics: false
+    proj_nc_analysis: false
+    multiclass_metrics: true
+  pca:
+    projected_dims: [1, 2]     # only 2 dims exist in this embedding
+  # NOTE: this dataset is 2D (or 3D), so the existing decision-boundary /
+  # 2D-scatter plotting paths that key off input_shape == (2,) for spiral
+  # etc. apply here too.
+
+output:
+  output_dir: /data/samuel_lozano/dynamical-sgd
