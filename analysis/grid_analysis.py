@@ -430,6 +430,76 @@ def _plot_single_heatmap(ax, grid: np.ndarray, x_labels: list[str], periods: lis
                 )
 
 
+def _diff_vs_first_column(grid: np.ndarray) -> np.ndarray:
+    """Returns a copy of `grid` where every column is replaced by its
+    difference with respect to column 0 (the fake w=1 / without_bumps
+    column), row-wise. Column 0 itself becomes all zeros (diff with
+    itself). NaNs propagate normally (nan - x == nan)."""
+    reference = grid[:, [0]]  # (n_rows, 1), broadcasts across columns
+    return grid - reference
+
+
+def _plot_diff_heatmap(ax, diff_grid: np.ndarray, x_labels: list[str], periods: list[int],
+                        title: str, annotate: bool) -> None:
+    """Like `_plot_single_heatmap`, but for a signed difference-from-baseline
+    grid: white at 0, red for positive (higher than baseline), blue for
+    negative (lower than baseline), with the color range fixed to the
+    grid's own actual min/max (asymmetric around 0 if the data is)."""
+    finite_vals = diff_grid[np.isfinite(diff_grid)]
+    vmin = float(np.min(finite_vals)) if finite_vals.size else -1.0
+    vmax = float(np.max(finite_vals)) if finite_vals.size else 1.0
+    # TwoSlopeNorm requires vmin < vcenter < vmax; nudge degenerate/one-sided
+    # ranges just enough to keep it valid while still hugging the real data.
+    if vmin >= 0.0:
+        vmin = -vmax if vmax > 0.0 else -1e-6
+    if vmax <= 0.0:
+        vmax = -vmin if vmin < 0.0 else 1e-6
+
+    norm = matplotlib.colors.TwoSlopeNorm(vmin=vmin, vcenter=0.0, vmax=vmax)
+    im = ax.imshow(diff_grid, origin="lower", aspect="auto", cmap="RdBu_r", norm=norm)
+    ax.set_xticks(range(len(x_labels)))
+    ax.set_xticklabels(x_labels, fontsize=8)
+    ax.set_yticks(range(len(periods)))
+    ax.set_yticklabels([str(p) for p in periods], fontsize=8)
+    ax.axvline(0.5, color="black", linewidth=1.5, linestyle="--")
+    ax.set_xlabel("w_max (bump width)")
+    ax.set_ylabel("period_length (T)")
+    ax.set_title(title, fontsize=10)
+    plt.colorbar(im, ax=ax, shrink=0.85, label="Δ vs. w=1 (no bumps)")
+
+    if annotate:
+        for i in range(diff_grid.shape[0]):
+            for j in range(diff_grid.shape[1]):
+                val = diff_grid[i, j]
+                if np.isnan(val):
+                    continue
+                ax.text(
+                    j, i, f"{val:+.2g}", ha="center", va="center",
+                    fontsize=6, color="black",
+                )
+
+
+def save_accuracies_diff_plot(result: GridResult, output_dir: Path, annotate: bool) -> None:
+    """Writes accuracies.png: train_accuracy / test_accuracy only, each cell
+    showing the difference with respect to that row's w=1 (without_bumps)
+    baseline column, rather than the raw accuracy value."""
+    fig, axes = plt.subplots(1, 2, figsize=(6 * 2, 4.5))
+
+    for ax, metric in zip(axes, ["train_accuracy", "test_accuracy"]):
+        diff_grid = _diff_vs_first_column(result.grids[metric]) * 100
+        _plot_diff_heatmap(
+            ax, diff_grid, result.x_labels, result.periods,
+            title=f"{metric} (Δ vs. w=1)", annotate=annotate,
+        )
+
+    fig.suptitle("Widths x Periods gridsearch — accuracy change vs. no-bumps baseline", fontsize=14)
+    fig.tight_layout(rect=[0.0, 0.0, 1.0, 0.94])
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_dir / "accuracies.png", dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Accuracies diff plot written to {output_dir / 'accuracies.png'}")
+
+
 def save_individual_heatmaps(result: GridResult, output_dir: Path, annotate: bool) -> None:
     out = output_dir / "gridmaps"
     out.mkdir(parents=True, exist_ok=True)
@@ -612,6 +682,7 @@ def main() -> None:
     annotate = not args.no_annotate
     save_individual_heatmaps(result, output_dir, annotate=annotate)
     save_overview(result, output_dir, annotate=annotate)
+    save_accuracies_diff_plot(result, output_dir, annotate=annotate)
     save_summary_csv(result, output_dir)
 
     print(f"\nDone. Gridmaps written under {output_dir}")

@@ -20,7 +20,7 @@ training:
   training_steps: 500000
   save_metrics_every_n_steps: 50
   batch_size: 200
-  random_seed: 42
+  random_seed: 0
   loss: cross_entropy
 optimizer:
   beta1: 0.9
@@ -42,14 +42,14 @@ dynamics:
 analysis:
   plot_version: simplified
   outputs:
-    classifier_metrics: true
+    classifier_metrics: false
     nc_metrics: false
     separability_metrics: false
     pca_analysis: false
     pca_geometric: false
     hyperplane_metrics: false
     proj_nc_analysis: false
-    multiclass_metrics: false
+    multiclass_metrics: true
   pca:
     projected_dims: [1, 2, 3, 5]
 output:
