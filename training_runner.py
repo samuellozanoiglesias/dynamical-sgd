@@ -1593,13 +1593,13 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
             last_test_metrics = test_metrics
 
             focus_text = str(bump_state["focus_class"]) if bump_state["active"] else "-"
-            print(
-                f"[{run_label}] epoch {epoch:04d}/{total_epochs:04d} | "
-                f"step {global_step:06d}/{total_steps:06d} | "
-                f"train loss {train_metrics['loss']:.4f} acc {train_metrics['accuracy']:.4f} | "
-                f"test loss {test_metrics['loss']:.4f} acc {test_metrics['accuracy']:.4f} | "
-                f"bumps {'on' if bump_state['active'] else 'off'} focus {focus_text}"
-            )
+            #print(
+            #    f"[{run_label}] epoch {epoch:04d}/{total_epochs:04d} | "
+            #    f"step {global_step:06d}/{total_steps:06d} | "
+            #    f"train loss {train_metrics['loss']:.4f} acc {train_metrics['accuracy']:.4f} | "
+            #    f"test loss {test_metrics['loss']:.4f} acc {test_metrics['accuracy']:.4f} | "
+            #    f"bumps {'on' if bump_state['active'] else 'off'} focus {focus_text}"
+            #)
 
     architecture = str(model_cfg.get("architecture", "mlp"))
     plot_training_report(

@@ -19,8 +19,7 @@ Configure your datasets in the DATASETS dict below:
 Each path can point either to:
   (a) a parent directory containing one or more `training_<timestamp>/` runs
       (if several runs are found, they are averaged together, aligned on
-      `global_step`, into a single curve per dataset -- handy if you have several
-      seeds per dataset), or
+      `global_step`, into a single curve per dataset with a shaded std dev band), or
   (b) directly to a single `training_<timestamp>/` run folder.
 
 Each run folder is expected to contain (searched recursively, so subfolders
@@ -46,17 +45,12 @@ Five PNGs are written to OUTPUT_DIR (one line per dataset in every panel):
     neural_collapse.png                  (2x2)
     high_dimensional_classification.png  (2x2)
     cylinder_hyperplanes.png             (3x2)
-    projected_nc.png                     (2x2)  <-- new
+    projected_nc.png                     (2x2)
 
 Usage
 -----
 
 nohup python DATASETS_analysis.py --training_type without_bumps > log.out 2>&1 &
-
-Column-mapping assumptions are identical to plot_num_modes.py -- see that
-script's docstring / the comments below if you need to tweak a mapping
-(e.g. "Principal axis alignment" currently uses `cyl_axis_cosine_<i>v<j>`
-from PCA_geometric.csv).
 """
 
 import argparse
@@ -297,9 +291,7 @@ def cyl_axis_cosine_cols(df):
  
  
 def std_hp_angle(df):
-    """Std (population, ddof=0) of the 3 hp_angle_(...)v(...) columns.
-    Their mean is a fixed 60 degrees, so this equals the RMS deviation
-    from 60 degrees -- i.e. how unevenly the 3 pairwise angles are spread."""
+    """Std (population, ddof=0) of the 3 hp_angle_(...)v(...) columns."""
     cols = detect_hp_angle_cols(df)
     if not cols:
         return pd.Series(np.nan, index=df.index)
@@ -314,15 +306,6 @@ def mean_cyl_axis_cosine(df):
     return df[cols].mean(axis=1)
  
  
-# --------------------------------------------------------------------------- #
-# proj_nc_metrics.csv helpers
-# Column naming from projection_PCA_analysis.py:
-#   elongation_<c>           -- per-class elongation ratio (λ₁ / mean(λ₂…λ_D))
-#   axis_alignment_<i>_<j>  -- |cos θ| between cylinder axes of class i and j
-#   axis_angle_deg_<i>_<j>  -- angle in degrees between cylinder axes
-#   nc1_original / nc1_deflated
-#   nc2_original / nc2_deflated
-# --------------------------------------------------------------------------- #
 def detect_classes_proj(df, prefix):
     """Return sorted class indices for columns named '<prefix>_<i>' (single index)."""
     pattern = re.compile(rf"^{re.escape(prefix)}_(\d+)$")
@@ -385,9 +368,8 @@ def axis_alignment_cols(df):
 def get_curve(group_runs, csv_key, value_fn):
     """
     value_fn(df) -> pd.Series of the metric, indexed like df.
-    Returns (global_step_array, mean_value_array) averaged across all runs in
-    group_runs that have csv_key available (handles multiple seeds sharing
-    the same dataset label).
+    Returns (global_step_array, mean_value_array, std_value_array) averaged
+    across all runs in group_runs that have csv_key available.
     """
     series_list = []
     for r in group_runs:
@@ -406,15 +388,16 @@ def get_curve(group_runs, csv_key, value_fn):
         series_list.append(s)
  
     if not series_list:
-        return None, None
+        return None, None, None
  
     combined = pd.concat(series_list, axis=1)
     mean_curve = combined.mean(axis=1, skipna=True).sort_index()
-    return mean_curve.index.values, mean_curve.values
+    std_curve = combined.std(axis=1, skipna=True).sort_index().fillna(0)
+    return mean_curve.index.values, mean_curve.values, std_curve.values
  
  
 def smooth(values, window):
-    if window is None or window <= 1:
+    if window is None or window <= 1 or values is None:
         return values
     s = pd.Series(values)
     return s.rolling(window=window, min_periods=1, center=True).mean().values
@@ -424,15 +407,20 @@ def smooth(values, window):
 # Plotting primitives
 # --------------------------------------------------------------------------- #
 def plot_single_metric(ax, groups, csv_key, value_fn, ylabel, title, color_map, smooth_window):
-    """One line per dataset, color encodes dataset."""
+    """One line per dataset (mean curve), shaded area for std dev."""
     any_data = False
     for label, group_runs in groups.items():
-        global_step, vals = get_curve(group_runs, csv_key, value_fn)
+        global_step, vals, stds = get_curve(group_runs, csv_key, value_fn)
         if global_step is None or len(global_step) == 0:
             continue
         vals = smooth(vals, smooth_window)
-        ax.plot(global_step, vals, color=color_map[label], linewidth=1.6, alpha=0.9, label=str(label))
+        stds = smooth(stds, smooth_window)
+        color = color_map[label]
+        
+        ax.plot(global_step, vals, color=color, linewidth=1.6, alpha=0.9, label=str(label))
+        ax.fill_between(global_step, vals - stds, vals + stds, color=color, alpha=0.2, edgecolor="none")
         any_data = True
+
     if not any_data:
         ax.text(0.5, 0.5, "no data found", ha="center", va="center", transform=ax.transAxes)
     ax.set_xlabel("Global step")
@@ -444,8 +432,7 @@ def plot_single_metric(ax, groups, csv_key, value_fn, ylabel, title, color_map, 
 def plot_multi_metric(ax, groups, csv_key, columns_fn, ylabel, title, color_map, smooth_window, transform=None):
     """
     Several lines per dataset (e.g. one per class-pair). Color encodes
-    dataset, linestyle encodes which column. Returns the canonical column
-    list used (for building a separate linestyle legend), or [] if no data.
+    dataset, linestyle encodes which column, with standard deviation shadows.
     """
     canonical_cols = None
     for label, group_runs in groups.items():
@@ -478,11 +465,14 @@ def plot_multi_metric(ax, groups, csv_key, columns_fn, ylabel, title, color_map,
                 if transform: return transform(val)
                 return val
             
-            global_step, vals = get_curve(group_runs, csv_key, val_fn)
+            global_step, vals, stds = get_curve(group_runs, csv_key, val_fn)
             if global_step is None or len(global_step) == 0:
                 continue
             vals = smooth(vals, smooth_window)
+            stds = smooth(stds, smooth_window)
+
             ax.plot(global_step, vals, color=color, linestyle=ls, linewidth=1.3, alpha=0.85)
+            ax.fill_between(global_step, vals - stds, vals + stds, color=color, alpha=0.15, edgecolor="none")
  
     ax.set_xlabel("Global step")
     ax.set_ylabel(ylabel)
@@ -518,7 +508,7 @@ def add_dataset_legend(fig, color_map):
  
  
 # --------------------------------------------------------------------------- #
-# The four figures
+# The five figures
 # --------------------------------------------------------------------------- #
 def plot_accuracies(groups, output_dir, color_map, smooth_window):
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
@@ -736,7 +726,7 @@ def plot_NN_comparison(groups, output_dir, color_map, smooth_window):
 # Main
 # --------------------------------------------------------------------------- #
 def main():
-    parser = argparse.ArgumentParser(description="Plot CSV metrics across datasets (one line per dataset).")
+    parser = argparse.ArgumentParser(description="Plot CSV metrics across datasets (mean and std shadow).")
     parser.add_argument("--training_type", default="without_bumps", help="Type of training data to analyze.")
     parser.add_argument("--output", default=None, help="Directory to save output PNGs.")
     parser.add_argument("--smooth", type=int, default=SMOOTH_WINDOW,
@@ -755,14 +745,12 @@ def main():
         raise ValueError(error_msg)
     
     DATASETS = {
-    "Blobs": f"{root_dir}/blobs-{extension}/",
-    "Spiral": f"{root_dir}/spiral-{extension}/",
-    "Dartboard": f"{root_dir}/dartboard-{extension}/",
-    "Rings": f"{root_dir}/rings-{extension}/",
-    "Checkerboard": f"{root_dir}/checkerboard-{extension}/",
-    # add more datasets here, e.g.:
-    # "Blobs": f"{root_dir}/blobs-{args.training_type}/training_2026..._.../",
-}
+    #    "Blobs": f"{root_dir}/blobs-{extension}/",
+        "Spiral": f"{root_dir}/spiral-{extension}/",
+    #    "Dartboard": f"{root_dir}/dartboard-{extension}/",
+        "Rings": f"{root_dir}/rings-{extension}/",
+        "Checkerboard": f"{root_dir}/checkerboard-{extension}/",
+    }
  
     runs = discover_all(DATASETS)
     if not runs:
