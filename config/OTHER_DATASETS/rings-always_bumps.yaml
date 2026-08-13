@@ -50,7 +50,13 @@ analysis:
     hyperplane_metrics: false
     proj_nc_analysis: false
     multiclass_metrics: true
+    deep_inside_training: true
   pca:
     projected_dims: [1, 2, 3, 5]
+  # How often (in save_metrics_every_n_steps units) to run the
+  # deep_inside_training landscape diagnostics (Hessian power iteration
+  # + minibatch gradient resampling). 1 = every save point, 10 = every
+  # 10th. These are more expensive than the other per-epoch metrics.
+  deep_inside_training_stride: 10
 output:
   output_dir: /data/samuel_lozano/dynamical-sgd

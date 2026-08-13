@@ -94,6 +94,12 @@ from metrics_for_multiple_classes import (
 )
 
 from model import JAXModel, ParamTree, build_model
+from deep_inside_training import (
+    append_deep_csv_row,
+    collect_deep_epoch,
+    finalize_deep_plots,
+    initialize_deep_csv,
+)
 
 
 @dataclass
@@ -1127,6 +1133,19 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
     enable_hp_metrics = _analysis_output_enabled(analysis_cfg, ("hyperplane_metrics", "hyperplanes"))
     enable_proj_nc = _analysis_output_enabled(analysis_cfg, ("proj_nc_analysis",))
     enable_multiclass_metrics = _analysis_output_enabled(analysis_cfg, ("multiclass_metrics",))
+    enable_deep_metrics = _analysis_output_enabled(
+        analysis_cfg, ("deep_inside_training",), default=False
+    )
+    # Landscape diagnostics (Hessian power iteration + minibatch resampling)
+    # are expensive relative to the other per-epoch metrics, so they run
+    # only every N epochs; set analysis.deep_inside_training_stride to 1 to
+    # compute at every save point.
+    deep_metrics_stride = max(1, int(analysis_cfg.get("deep_inside_training_stride", 10)))
+    if enable_deep_metrics and use_pytorch_cnn:
+        raise ValueError(
+            "analysis.outputs.deep_inside_training is only supported for the JAX MLP path "
+            "(model.architecture in {mlp, mlp_relu, mlp_tanh}), not the PyTorch CNN path."
+        )
 
     collect_pre_classifier = (
         enable_classifier_metrics or enable_pca_analysis
@@ -1224,6 +1243,13 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
         multiclass_shape_path = run_dir / "collapse_shapes.png"
         initialize_multiclass_csv(multiclass_csv_path)
 
+    deep_csv_path: Path | None = None
+    deep_figure_path: Path | None = None
+    if enable_deep_metrics:
+        deep_csv_path = run_dir / "deep_inside_training.csv"
+        deep_figure_path = run_dir / "deep_inside_training.png"
+        initialize_deep_csv(deep_csv_path)
+
     if use_pytorch_cnn:
         predict_step = lambda step_params, batch_x: model.apply(step_params, batch_x)
     else:
@@ -1297,6 +1323,7 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
                 freeze_step = None
 
             else:
+                params_before_block = params
                 (params, opt_state, _step_train_metrics, global_step, bump_state, step_distributions,
                  cumulative_weight_distance, prev_params, last_classifier_grads, initial_params,
                  freeze_applied, grad_mask, reinit_key, freeze_step) = train_epoch(
@@ -1359,6 +1386,27 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
                 num_classes=num_classes,
                 compute_per_class=compute_per_class_flag, # Pass it here
             )
+
+            if enable_deep_metrics and (epoch % deep_metrics_stride == 0 or epoch == total_epochs):
+                deep_raw = collect_deep_epoch(
+                    model=model,
+                    params_before=params_before_block,
+                    params_after=params,
+                    metric_inputs=metric_inputs,
+                    metric_targets=metric_targets,
+                    train_inputs=dataset_bundle.train_inputs,
+                    train_targets=dataset_bundle.train_targets,
+                    num_classes=num_classes,
+                    batch_size=batch_size,
+                    rng=rng,
+                    device=device,
+                )
+                append_deep_csv_row(
+                    csv_path=deep_csv_path,
+                    epoch=epoch,
+                    global_step=global_step,
+                    raw=deep_raw,
+                )
 
             if enable_nc_metrics:
                 nc_raw = collect_nc_raw_epoch(
@@ -1705,6 +1753,14 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
             tpt_step=tpt_step if tpt_reached else -1,
         )
 
+    if enable_deep_metrics:
+        finalize_deep_plots(
+            csv_path=deep_csv_path,
+            output_path=deep_figure_path,
+            tpt_step=tpt_step if tpt_reached else -1,
+            title=f"{run_label} | {dataset_name} | landscape diagnostics",
+        )
+
     boundary_figure_path: Path | None = None
     if dataset_key in {"spiral", "gaussian_blobs", "blobs", "rings", "checkerboard", "random_checkerboard", "dartboard"}:
         boundary_figure_path = run_dir / f"{dataset_key}_decision_boundaries.png"
@@ -1758,6 +1814,8 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
         "hp_csv_path":    str(hp_csv_path)    if hp_csv_path    is not None else None,
         "hp_figure_path": str(hp_figure_path) if hp_figure_path is not None else None,
         "distribution_figure_path": str(distribution_figure_path),
+        "deep_csv_path": str(deep_csv_path) if deep_csv_path is not None else None,
+        "deep_figure_path": str(deep_figure_path) if deep_figure_path is not None else None,
         "decision_boundary_path": str(boundary_figure_path) if boundary_figure_path is not None else None,
         "final_train_loss": float(last_train_metrics["loss"]),
         "final_train_accuracy": float(last_train_metrics["accuracy"]),

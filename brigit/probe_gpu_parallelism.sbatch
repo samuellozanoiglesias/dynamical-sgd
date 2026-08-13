@@ -21,7 +21,7 @@ source ~/.bashrc
 conda activate dynamical-sgd
 cd /mnt/lustre/home/samuloza/dynamical-sgd/
 
-config_file="config/CIFAR10/cifar10_resnet_narrow-always_bumps.yaml"
+config_file="config/CIFAR10/cifar10_plaincnn_bottleneck50-always_bumps.yaml"
 PROBE_DIR=/mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/gpu_probe/${SLURM_JOB_ID}
 mkdir -p "$PROBE_DIR"
 
@@ -39,7 +39,7 @@ export XLA_PYTHON_CLIENT_ALLOCATOR=platform
 # ==========================================
 # Tunables
 # ==========================================
-MAX_TO_TEST=16       # highest concurrency level to try; GPU memory was NOT the limiter last run
+MAX_TO_TEST=20       # highest concurrency level to try; GPU memory was NOT the limiter last run
 STEPS_FOR_PROBE=200  # a bit longer than before so timing differences are measurable, not noise
 
 # Background GPU memory/utilization logger (every 2s)
