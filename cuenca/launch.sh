@@ -4,24 +4,13 @@
 # Configuration
 # =====================================================
 
-CONFIG_NAME="checkerboard-no_bumps"
-
+CONFIG_NAME="rings-always_bumps"
+CONFIG="config/OTHER_DATASETS/${CONFIG_NAME}.yaml"
 DATA_DIR="/home/samuel_lozano/dynamical-sgd/data"
 OUTPUT_DIR="/data/samuel_lozano/dynamical-sgd"
 
 # Seeds to run
-SEEDS=(
-    0
-    10
-    20
-    30
-    40
-    50
-    60
-    70
-    80
-    90
-)
+SEEDS=(0 30)
 
 # Maximum simultaneous jobs
 MAX_PARALLEL=4
@@ -31,7 +20,6 @@ MAX_PARALLEL=4
 # =====================================================
 
 LOG="launch_${CONFIG_NAME}.log"
-CONFIG="config/${CONFIG_NAME}.yaml"
 
 # If we're not already running under nohup, restart ourselves.
 if [[ -z "$LAUNCH_INTERNAL" ]]; then

@@ -49,7 +49,7 @@ analysis:
     pca_geometric: false
     hyperplane_metrics: false
     proj_nc_analysis: false
-    multiclass_metrics: false
+    multiclass_metrics: true
     deep_inside_training: true
   pca:
     projected_dims: [1, 2, 3, 5]
@@ -58,5 +58,23 @@ analysis:
   # + minibatch gradient resampling). 1 = every save point, 10 = every
   # 10th. These are more expensive than the other per-epoch metrics.
   deep_inside_training_stride: 10
+videos:
+  enabled: true
+  every_n_steps: 2500        # snapshot cadence, in training steps
+  fps: 60                     # gif playback speed
+  feature_layer: pre_classifier   # input | first_activation_post | pre_classifier
+  umap_seed: 0
+  pca:
+    reduce_dim: 3       # dimensionality PCA reduces the feature layer to
+    plot_dim: 3         # 2 or 3 -- how many of those dims to scatter-plot
+  umap:
+    reduce_dim: 3       # dimensionality UMAP reduces the feature layer to
+    plot_dim: 3         # 2 or 3 -- how many of those dims to scatter-plot
+  # For both pca and umap, reduce_dim must be >= plot_dim (you can't plot
+  # more dimensions than you reduced to).
+  decision_boundary_grid_size: 250
+  decision_boundary_grid_size: 250
+  align_embeddings: true
+  standardize_embeddings: false
 output:
   output_dir: /data/samuel_lozano/dynamical-sgd

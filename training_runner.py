@@ -100,6 +100,7 @@ from deep_inside_training import (
     finalize_deep_plots,
     initialize_deep_csv,
 )
+from training_video import parse_video_config, VideoFrameRecorder
 
 
 @dataclass
@@ -1104,6 +1105,28 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
         freeze_step_applied = None
         reinit_key = jax.random.PRNGKey(int(random_seed) + 1)
 
+    # "Training video" snapshots (UMAP / PCA / decision-boundary frames,
+    # stitched into GIFs at the end). Opt-in via config.yaml's `videos:`
+    # section; only supported on the JAX MLP path.
+    video_cfg = parse_video_config(config)
+    if video_cfg.enabled and use_pytorch_cnn:
+        raise ValueError(
+            "videos.enabled is only supported for the JAX MLP path "
+            "(model.architecture in {mlp, mlp_relu, mlp_tanh}), not the PyTorch CNN path."
+        )
+    video_recorder = VideoFrameRecorder(
+        run_dir=run_dir,
+        cfg=video_cfg,
+        dataset_key=dataset_key,
+        num_classes=num_classes,
+        metric_inputs=metric_inputs,
+        metric_targets=metric_targets,
+        test_metric_inputs=test_metric_inputs,
+        test_metric_targets=test_metric_targets,
+    )
+    if video_recorder.enabled:
+        video_recorder.capture(0, model, params, run_label, dataset_name)
+
     total_epochs = int(math.ceil(total_steps / save_metrics_every_n_steps))
 
     if use_pytorch_cnn:
@@ -1389,6 +1412,9 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
                 compute_per_class=compute_per_class_flag, # Pass it here
             )
 
+            if video_recorder.enabled and video_recorder.should_capture(global_step, total_steps):
+                video_recorder.capture(global_step, model, params, run_label, dataset_name)
+
             if enable_deep_metrics and (epoch % deep_metrics_stride == 0 or epoch == total_epochs):
                 deep_raw, prev_deep_state = collect_deep_epoch(
                     model=model,
@@ -1650,13 +1676,17 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
             last_test_metrics = test_metrics
 
             focus_text = str(bump_state["focus_class"]) if bump_state["active"] else "-"
-            print(
-                f"[{run_label}] epoch {epoch:04d}/{total_epochs:04d} | "
-                f"step {global_step:06d}/{total_steps:06d} | "
-                f"train loss {train_metrics['loss']:.4f} acc {train_metrics['accuracy']:.4f} | "
-                f"test loss {test_metrics['loss']:.4f} acc {test_metrics['accuracy']:.4f} | "
-                f"bumps {'on' if bump_state['active'] else 'off'} focus {focus_text}"
-            )
+            #print(
+            #    f"[{run_label}] epoch {epoch:04d}/{total_epochs:04d} | "
+            #    f"step {global_step:06d}/{total_steps:06d} | "
+            #    f"train loss {train_metrics['loss']:.4f} acc {train_metrics['accuracy']:.4f} | "
+            #    f"test loss {test_metrics['loss']:.4f} acc {test_metrics['accuracy']:.4f} | "
+            #    f"bumps {'on' if bump_state['active'] else 'off'} focus {focus_text}"
+            #)
+
+    video_outputs: dict[str, str] = {}
+    if video_recorder.enabled:
+        video_outputs = video_recorder.finalize()
 
     architecture = str(model_cfg.get("architecture", "mlp"))
     plot_training_report(
@@ -1827,6 +1857,9 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
         "deep_csv_path": str(deep_csv_path) if deep_csv_path is not None else None,
         "deep_figure_path": str(deep_figure_path) if deep_figure_path is not None else None,
         "decision_boundary_path": str(boundary_figure_path) if boundary_figure_path is not None else None,
+        "video_umap_gif": video_outputs.get("umap"),
+        "video_pca_gif": video_outputs.get("pca"),
+        "video_decision_boundary_gif": video_outputs.get("decision_boundary"),
         "final_train_loss": float(last_train_metrics["loss"]),
         "final_train_accuracy": float(last_train_metrics["accuracy"]),
         "final_test_loss": float(last_test_metrics["loss"]),
