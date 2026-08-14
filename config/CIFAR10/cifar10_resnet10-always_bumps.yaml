@@ -34,7 +34,7 @@ dynamics:
   bumps_before_tpt: true
   bumps_at_tpt: true
   period_length: 200
-  w_max: 70.0
+  w_max: 20.0
   amplitude: 1.0
   bump_order:
   tpt_accuracy_threshold: 1.0

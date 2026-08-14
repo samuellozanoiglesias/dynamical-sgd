@@ -29,8 +29,20 @@ echo "Starting job..."
 # jax_params.pkl, dataset_bundle.npz as saved by training_runner.py).
 # Add/remove entries here to cover whichever datasets you want plotted.
 run_dirs=(
-    "/mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/without_bumps/spiral/training_2026_08_10-12_00_00"
-    "/mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/without_bumps/rings/training_2026_08_10-13_10_00"
+    "/mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/with_bumps/spiral-always_bumps/training_2026_08_13-16_31_00"
+    "/mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/with_bumps/spiral-always_bumps/training_2026_08_13-19_12_42"
+    "/mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/with_bumps/rings-always_bumps/training_2026_08_13-16_31_29"
+    "/mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/with_bumps/rings-always_bumps/training_2026_08_13-19_10_18"
+    "/mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/without_bumps/spiral-no_bumps/training_2026_08_13-13_22_11"
+    "/mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/without_bumps/spiral-no_bumps/training_2026_08_13-16_30_16"
+    "/mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/without_bumps/spiral-no_bumps/training_2026_08_13-16_30_54"
+    "/mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/without_bumps/spiral-no_bumps/training_2026_08_13-22_13_17"
+    "/mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/without_bumps/spiral-no_bumps/training_2026_08_13-23_01_09"
+    "/mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/without_bumps/rings-no_bumps/training_2026_08_13-13_22_11"
+    "/mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/without_bumps/rings-no_bumps/training_2026_08_13-16_31_29"
+    "/mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/without_bumps/rings-no_bumps/training_2026_08_13-18_56_28"
+    "/mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/without_bumps/rings-no_bumps/training_2026_08_13-22_12_41"
+    "/mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/without_bumps/rings-no_bumps/training_2026_08_13-22_12_43"
 )
 
 reduce_methods=(pca umap tsne)

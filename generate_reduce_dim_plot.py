@@ -19,6 +19,7 @@ nohup python generate_reduce_dim_plot.py \
 '''
 
 import argparse
+import yaml
 from pathlib import Path
 from generate_dataset import build_dataset_bundle
 
@@ -52,6 +53,45 @@ mapping_default3 = [
     [2, 5, 8]
 ]
 
+
+def load_reduce_cnn_config(checkpoint_file: Path, pretrained_num_classes: int) -> dict:
+    """
+    Build the 'reduce_cnn' sub-config by reading the run's own config.yaml
+    (expected to sit next to model_weights.pt, i.e. in checkpoint_file.parent)
+    and copying its 'model.cnn' section as-is.
+
+    model.cnn already uses exactly the layout _pretrained_checkpoint_features
+    (generate_dataset.py) and training_runner.py expect for data.reduce_cnn:
+      - flat keys for 'simple_cnn' (channels, kernel_size, use_batchnorm,
+        pool_every_block, dropout, fc_hidden_dim live directly under cnn.)
+      - a nested '<backbone>' sub-dict for 'resnet'/'myrtle' (e.g.
+        cnn.resnet = {num_stages, blocks_per_stage, width_mult}).
+    So rather than re-deriving that structure, we just copy model.cnn
+    wholesale and add the two extra fields reduce_cnn needs on top
+    (checkpoint, pretrained_num_classes).
+    """
+    config_path = checkpoint_file.parent / "config.yaml"
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"Could not find config.yaml next to checkpoint at: {config_path}"
+        )
+
+    with open(config_path, "r") as f:
+        run_config = yaml.safe_load(f)
+
+    try:
+        model_cnn = run_config["model"]["cnn"]
+        _ = model_cnn["backbone"]  # just validate it's present
+    except KeyError as e:
+        raise KeyError(
+            f"config.yaml at {config_path} is missing expected model.cnn.{e} field"
+        )
+
+    reduce_cnn = dict(model_cnn)  # shallow copy: backbone, plus flat or nested params
+    reduce_cnn["checkpoint"] = str(checkpoint_file)
+    reduce_cnn["pretrained_num_classes"] = pretrained_num_classes
+    return reduce_cnn
+
 def main():
     parser = argparse.ArgumentParser(description="Generate reduced CIFAR-10 metaclass dataset plots.")
     
@@ -63,7 +103,9 @@ def main():
                         help="ID of the checkpoint to use.")
     parser.add_argument("--pretrained_num_classes", type=int, default=3, 
                         help="Number of classes the checkpoint's head was trained with.")
-    
+    parser.add_argument("--plotting_num_classes", type=int, default=3,
+                        help="Number of classes to plot (should match the checkpoint's head).")
+
     # Existing reduction parameters
     parser.add_argument("--reduce_dim", type=int, default=2, 
                         help="Target dimensionality for reduction (e.g., 2, 3, 50).")
@@ -89,7 +131,12 @@ def main():
 
     args = parser.parse_args()
 
-    checkpoint_file = Path(f'/mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/without_bumps/{args.checkpoint_type}/{args.checkpoint_id}/model_weights.pt') 
+    if args.checkpoint_type.endswith("always_bumps"):
+        folder_type="with_bumps"
+    else:
+        folder_type="without_bumps"
+
+    checkpoint_file = Path(f'/mnt/lustre/home/samuloza/data/samuel_lozano/dynamical-sgd/{folder_type}/{args.checkpoint_type}/{args.checkpoint_id}/model_weights.pt') 
     
     # Output dir defaults to the checkpoint's directory unless explicitly overridden
     if args.out_dir is not None:
@@ -99,7 +146,7 @@ def main():
     
     out_dir = out_dir / f"plots_reduce_dim_{args.reduce_method}"
 
-    if args.metaclass_mapping_type is None:
+    if args.metaclass_mapping_type is None or args.metaclass_mapping_type == "":
         if args.checkpoint_type.endswith("intuitive"):
             metaclass_mapping = mapping_intuitive
         elif args.checkpoint_type.endswith("default0"):
@@ -130,35 +177,35 @@ def main():
             raise ValueError(f"Unknown metaclass mapping type: {args.metaclass_mapping_type}")
 
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Pull the reduce_cnn spec (backbone + architecture params) straight from
+    # the checkpoint's own config.yaml, rather than hardcoding resnet18.
+    reduce_cnn = load_reduce_cnn_config(checkpoint_file, args.pretrained_num_classes)
+
     # Reconstruct the configuration requested, injecting the sys args
     config = {
-        "use_gpu": args.use_gpu,  # Added to root to match YAML structure
+        "use_gpu": args.use_gpu,
         "data": {
             "dataset_name": "cifar10",
             "data_dir": "./data",
-            "num_classes": 3,
-            "metaclass_mapping": metaclass_mapping,
+            "num_classes": args.plotting_num_classes,
             "reduce_dim": args.reduce_dim,
             "reduce_method": args.reduce_method,
             "reduce_source": "pretrained_checkpoint",
             "reduce_seed": args.reduce_seed,
             "plot_dim": args.plot_dim,
             "reduce_standardize": True,
-            "reduce_cnn": {
-                "backbone": "resnet18",
-                "checkpoint": str(checkpoint_file),
-                "pretrained_num_classes": args.pretrained_num_classes,
-                "resnet": {
-                    "num_stages": 4,
-                    "blocks_per_stage": [2, 2, 2, 2],
-                    "width_mult": 1.0
-                }
-            }
-        }
+            "reduce_cnn": reduce_cnn,
+        },
     }
+    
+    # Add the key conditionally
+    if args.plotting_num_classes == 3:
+        config["data"]["metaclass_mapping"] = metaclass_mapping
 
     print(f"Generating dataset bundle... (Method: {args.reduce_method}, Dim: {args.reduce_dim})")
     print(f"Using checkpoint: {checkpoint_file}")
+    print(f"Using backbone from config.yaml: {reduce_cnn['backbone']}")
     print(f"Saving plots to: {out_dir}")
     
     # build_dataset_bundle handles the data loading, the CNN feature extraction, 

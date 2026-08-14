@@ -25,13 +25,14 @@ cd /mnt/lustre/home/samuloza/dynamical-sgd/
 
 echo "Starting training job..."
 
-checkpoint_type="cifar10_metaclasses_finetune_intuitive"
-checkpoint_id="training_2026_07_24-05_24_13"
-pretrained_num_classes=3
+checkpoint_type="cifar10_resnet10-always_bumps"
+checkpoint_id="training_2026_08_13-14_43_35"
+pretrained_num_classes=10
+plotting_num_classes=3
 metaclass_mapping_type="intuitive"
-reduce_method="tsne"
-reduce_dims=(2 3)
-plot_dims=(3)
+reduce_method="umap"
+reduce_dims=(2 3 5)
+plot_dims=(2 3)
 
 for dim in "${reduce_dims[@]}"; do
     for plot_dim in "${plot_dims[@]}"; do
@@ -40,6 +41,7 @@ for dim in "${reduce_dims[@]}"; do
             python generate_reduce_dim_plot.py \
                 --checkpoint_type "$checkpoint_type" \
                 --checkpoint_id "$checkpoint_id" \
+                --plotting_num_classes $plotting_num_classes \
                 --pretrained_num_classes $pretrained_num_classes \
                 --metaclass_mapping_type "$metaclass_mapping_type" \
                 --reduce_dim $dim \

@@ -49,7 +49,7 @@ analysis:
     pca_geometric: false
     hyperplane_metrics: false
     proj_nc_analysis: false
-    multiclass_metrics: true
+    multiclass_metrics: false
     deep_inside_training: true
   pca:
     projected_dims: [1, 2, 3, 5]

@@ -1248,7 +1248,7 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
     if enable_deep_metrics:
         deep_csv_path = run_dir / "deep_inside_training.csv"
         deep_figure_path = run_dir / "deep_inside_training.png"
-        initialize_deep_csv(deep_csv_path)
+        initialize_deep_csv(deep_csv_path, num_classes)
 
     if use_pytorch_cnn:
         predict_step = lambda step_params, batch_x: model.apply(step_params, batch_x)
@@ -1261,6 +1261,7 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
     tpt_step = -1
     rng = np.random.default_rng(random_seed)
     class_distribution_history: list[np.ndarray] = []
+    prev_deep_state: Dict[str, Any] | None = None
 
     cnn_shuffler = None
     if use_pytorch_cnn:
@@ -1324,6 +1325,7 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
 
             else:
                 params_before_block = params
+                opt_state_before_block = opt_state
                 (params, opt_state, _step_train_metrics, global_step, bump_state, step_distributions,
                  cumulative_weight_distance, prev_params, last_classifier_grads, initial_params,
                  freeze_applied, grad_mask, reinit_key, freeze_step) = train_epoch(
@@ -1388,24 +1390,31 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
             )
 
             if enable_deep_metrics and (epoch % deep_metrics_stride == 0 or epoch == total_epochs):
-                deep_raw = collect_deep_epoch(
+                deep_raw, prev_deep_state = collect_deep_epoch(
                     model=model,
                     params_before=params_before_block,
                     params_after=params,
+                    initial_params=initial_params,
+                    opt_state_before=opt_state_before_block,
                     metric_inputs=metric_inputs,
                     metric_targets=metric_targets,
                     train_inputs=dataset_bundle.train_inputs,
                     train_targets=dataset_bundle.train_targets,
                     num_classes=num_classes,
                     batch_size=batch_size,
+                    learning_rate=learning_rate,
+                    adam_eps=eps,
+                    adam_beta2=beta2,
                     rng=rng,
                     device=device,
+                    prev_state=prev_deep_state,
                 )
                 append_deep_csv_row(
                     csv_path=deep_csv_path,
                     epoch=epoch,
                     global_step=global_step,
                     raw=deep_raw,
+                    num_classes=num_classes,
                 )
 
             if enable_nc_metrics:
@@ -1641,13 +1650,13 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
             last_test_metrics = test_metrics
 
             focus_text = str(bump_state["focus_class"]) if bump_state["active"] else "-"
-            #print(
-            #    f"[{run_label}] epoch {epoch:04d}/{total_epochs:04d} | "
-            #    f"step {global_step:06d}/{total_steps:06d} | "
-            #    f"train loss {train_metrics['loss']:.4f} acc {train_metrics['accuracy']:.4f} | "
-            #    f"test loss {test_metrics['loss']:.4f} acc {test_metrics['accuracy']:.4f} | "
-            #    f"bumps {'on' if bump_state['active'] else 'off'} focus {focus_text}"
-            #)
+            print(
+                f"[{run_label}] epoch {epoch:04d}/{total_epochs:04d} | "
+                f"step {global_step:06d}/{total_steps:06d} | "
+                f"train loss {train_metrics['loss']:.4f} acc {train_metrics['accuracy']:.4f} | "
+                f"test loss {test_metrics['loss']:.4f} acc {test_metrics['accuracy']:.4f} | "
+                f"bumps {'on' if bump_state['active'] else 'off'} focus {focus_text}"
+            )
 
     architecture = str(model_cfg.get("architecture", "mlp"))
     plot_training_report(
@@ -1757,6 +1766,7 @@ def run_training(config: dict, run_dir: Path, run_label: str) -> Dict[str, Any]:
         finalize_deep_plots(
             csv_path=deep_csv_path,
             output_path=deep_figure_path,
+            num_classes=num_classes,
             tpt_step=tpt_step if tpt_reached else -1,
             title=f"{run_label} | {dataset_name} | landscape diagnostics",
         )
